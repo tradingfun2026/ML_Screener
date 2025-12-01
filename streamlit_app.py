@@ -397,7 +397,9 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
         volume = hist["Volume"]
 
         price = float(close.iloc[-1])
-        vol_last = float(volume.iloc[-1])  # DAILY VOLUME SIGNAL
+        intra = stock.history(period="1d", interval="2m", prepost=True)
+current_volume = float(intra["Volume"].iloc[-1]) if not intra.empty else None
+vol_last = current_volume              # Now your UI shows LIVE volume
 
         is_watchlist_symbol = (exchange == "WATCH")
 
