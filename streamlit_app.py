@@ -100,9 +100,26 @@ with st.sidebar:
     st.header("Filters")
 
     max_price = st.number_input("Max Price ($)", 1.0, 1000.0, DEFAULT_MAX_PRICE, 1.0)
-    # V10 requirement: min volume can go down to 0, default unchanged
     min_volume = st.number_input("Min Daily Volume", 0, 10_000_000, DEFAULT_MIN_VOLUME, 10_000)
     min_breakout = st.number_input("Min Breakout Score", -50.0, 200.0, 0.0, 1.0)
+
+    # ✅ NEW: Min Breakout Confirmation & Min Entry Confidence (Option A)
+    min_breakout_confirm = st.number_input(
+        "Min Breakout Confirmation (0–100)",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0,
+        step=1.0,
+    )
+
+    min_entry_confidence = st.number_input(
+        "Min Entry Confidence (0–100)",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0,
+        step=1.0,
+    )
+
     min_pm_move = st.number_input("Min Premarket %", -50.0, 200.0, 0.0, 0.5)
     min_yday_gain = st.number_input("Min Yesterday %", -50.0, 200.0, 0.0, 0.5)
 
@@ -413,7 +430,6 @@ def news_sentiment_score(title: str, summary: str | None = None) -> float:
             score += 1
     for w in neg_words:
         if w in text:
-        # negative words subtract
             score -= 1
 
     # squash to [-1,1]
@@ -905,6 +921,12 @@ else:
         if vwap_only:
             df = df[df["VWAP%"].fillna(-999) > 0]
 
+        # ✅ NEW: Breakout Confirm & Entry Confidence filters
+        if min_breakout_confirm > 0.0:
+            df = df[df["Breakout_Confirm"].fillna(-999) >= min_breakout_confirm]
+        if min_entry_confidence > 0.0:
+            df = df[df["Entry_Confidence"].fillna(-999) >= min_entry_confidence]
+
     if df.empty:
         st.error("No results left after filters. Try relaxing constraints or disabling 'Ignore filters' toggle.")
     else:
@@ -1018,6 +1040,7 @@ else:
         )
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
