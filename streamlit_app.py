@@ -616,6 +616,22 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
                 total = buy_vol + sell_vol
                 if total > 0:
                     order_flow_bias = buy_vol / total  # 0..1
+               
+        # --- FIX: True premarket price override when 2m bars are missing ---
+        try:
+            fi = stock.fast_info
+            pre_price = fi.get("last_price", None)
+            prev_close = fi.get("regular_market_previous_close", None)
+
+            if pre_price and prev_close and prev_close > 0:
+                calc_pm = (pre_price - prev_close) / prev_close * 100
+
+                # Only override during premarket hours (before 9:30am ET)
+                now = datetime.now(timezone.utc)
+                if now.hour < 14 or (now.hour == 14 and now.minute < 30):
+                    premarket_pct = round(calc_pm, 2)
+        except Exception:
+            pass
 
         # If we didn't get live intraday volume, fall back to daily
         if live_intraday_volume is None:
