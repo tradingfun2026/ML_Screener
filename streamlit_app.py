@@ -100,26 +100,9 @@ with st.sidebar:
     st.header("Filters")
 
     max_price = st.number_input("Max Price ($)", 1.0, 1000.0, DEFAULT_MAX_PRICE, 1.0)
+    # V10 requirement: min volume can go down to 0, default unchanged
     min_volume = st.number_input("Min Daily Volume", 0, 10_000_000, DEFAULT_MIN_VOLUME, 10_000)
     min_breakout = st.number_input("Min Breakout Score", -50.0, 200.0, 0.0, 1.0)
-
-    # ✅ NEW: Min Breakout Confirmation & Min Entry Confidence (Option A)
-    min_breakout_confirm = st.number_input(
-        "Min Breakout Confirmation (0–100)",
-        min_value=0.0,
-        max_value=100.0,
-        value=0.0,
-        step=1.0,
-    )
-
-    min_entry_confidence = st.number_input(
-        "Min Entry Confidence (0–100)",
-        min_value=0.0,
-        max_value=100.0,
-        value=0.0,
-        step=1.0,
-    )
-
     min_pm_move = st.number_input("Min Premarket %", -50.0, 200.0, 0.0, 0.5)
     min_yday_gain = st.number_input("Min Yesterday %", -50.0, 200.0, 0.0, 0.5)
 
@@ -481,6 +464,82 @@ def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
     return round(max(0.0, min(100.0, base)), 1)
 
 
+# ========================= AI TARGET & STOP MODEL (ADDED) =========================
+def ai_target_and_stop(price, vwap_pct, rvol, flow, rsi7, m10, breakout_score):
+    """
+    AI-driven price target & stop-loss generator.
+    Returns (target_price, stop_price, rr_ratio, explanation).
+    """
+    if price is None or price <= 0:
+        return None, None, None, ""
+
+    # --- BASELINES ---
+    trend_factor = (m10 or 0) / 100.0
+    strength = (breakout_score or 0) / 100.0
+
+    # --- UPSIDE MODEL ---
+    upside_pct = 0.0
+
+    # Momentum adds upside
+    if m10 and m10 > 0:
+        upside_pct += min(0.03 + m10 / 200.0, 0.20)
+
+    # High RVOL increases upside
+    if rvol and rvol > 1.2:
+        upside_pct += min((rvol - 1.2) * 0.03, 0.08)
+
+    # Flow bias
+    if flow and flow > 0.55:
+        upside_pct += (flow - 0.55) * 0.10
+
+    # Breakout score
+    upside_pct += strength * 0.15
+
+    # VWAP extension penalty
+    if vwap_pct and vwap_pct > 6:
+        upside_pct -= 0.03  # overextension
+
+    upside_pct = max(0.03, upside_pct)  # minimum target 3%
+    target_price = round(price * (1.0 + upside_pct), 2)
+
+    # --- STOP MODEL ---
+    stop_pct = 0.03  # base 3% stop
+
+    # Below VWAP → deeper stop needed
+    if vwap_pct and vwap_pct < 0:
+        stop_pct += min(abs(vwap_pct) / 100.0, 0.05)
+
+    # Weak RSI → wider stop
+    if rsi7 and rsi7 < 45:
+        stop_pct += 0.02
+
+    # Strong flow → tighter stop
+    if flow and flow > 0.65:
+        stop_pct -= 0.01
+
+    # Very extended → tighter risk
+    if vwap_pct and vwap_pct > 8:
+        stop_pct -= 0.01
+
+    stop_pct = max(0.02, stop_pct)  # minimum stop 2%
+    stop_price = round(price * (1.0 - stop_pct), 2)
+
+    # --- RISK/REWARD ---
+    risk = price - stop_price
+    reward = target_price - price
+    if risk <= 0:
+        rr = None
+    else:
+        rr = round(reward / risk, 2)
+
+    explanation = (
+        f"Momentum-based target ~{round(upside_pct * 100, 1)}% "
+        f"vs. stop ~{round(stop_pct * 100, 1)}%, adjusted for VWAP, RVOL, RSI, and flow."
+    )
+
+    return target_price, stop_price, rr, explanation
+
+
 # ========================= SIMPLE AI COMMENTARY (V11 upgraded) =========================
 def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_conf, bci, preopen_mode):
     comments = []
@@ -719,6 +778,17 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
         entry_conf = entry_confidence_score(vwap_dist, rvol10, order_flow_bias)
         bci = breakout_confirmation_index(score, rvol10, premarket_pct, m10)
 
+        # 🔥 AI Target & Stop (added)
+        ai_target, ai_stop, ai_rr, ai_reason = ai_target_and_stop(
+            price=price,
+            vwap_pct=vwap_dist,
+            rvol=rvol10,
+            flow=order_flow_bias,
+            rsi7=rsi7,
+            m10=m10,
+            breakout_score=score,
+        )
+
         # AI commentary (upgraded)
         ai_text = ai_commentary(
             score=score,
@@ -764,6 +834,11 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
             "Sentiment": round(sentiment_score_val, 2),
             "Entry_Confidence": entry_conf,
             "Breakout_Confirm": bci,
+            # 🔥 New AI trade plan fields
+            "AI_Target": ai_target,
+            "AI_Stop": ai_stop,
+            "AI_RR": ai_rr,
+            "AI_Trade_Reason": ai_reason,
         }
 
     except Exception:
@@ -921,12 +996,6 @@ else:
         if vwap_only:
             df = df[df["VWAP%"].fillna(-999) > 0]
 
-        # ✅ NEW: Breakout Confirm & Entry Confidence filters
-        if min_breakout_confirm > 0.0:
-            df = df[df["Breakout_Confirm"].fillna(-999) >= min_breakout_confirm]
-        if min_entry_confidence > 0.0:
-            df = df[df["Entry_Confidence"].fillna(-999) >= min_entry_confidence]
-
     if df.empty:
         st.error("No results left after filters. Try relaxing constraints or disabling 'Ignore filters' toggle.")
     else:
@@ -991,6 +1060,19 @@ else:
             with c4.expander("📊 View 10-day chart"):
                 c4.plotly_chart(bigline(row["Spark"], f"{sym} - Last 10 Days"), use_container_width=True)
 
+            # 🔥 Full-width AI Trade Plan (Option C)
+            ai_target = row.get("AI_Target")
+            ai_stop = row.get("AI_Stop")
+            ai_rr = row.get("AI_RR")
+            ai_reason = row.get("AI_Trade_Reason", "")
+            if ai_target is not None and ai_stop is not None and ai_rr is not None:
+                st.markdown(
+                    f"📈 **AI Trade Plan** → 🎯 Target: **${ai_target}** | "
+                    f"🛑 Stop: **${ai_stop}** | R:R **{ai_rr}**"
+                )
+                if ai_reason:
+                    st.caption(f"Reason: {ai_reason}")
+
             st.divider()
 
         # V11: Watchlist multi-view panels
@@ -1017,6 +1099,9 @@ else:
                             "FlowBias",
                             "Breakout_Confirm",
                             "Entry_Confidence",
+                            "AI_Target",
+                            "AI_Stop",
+                            "AI_RR",
                         ]
                     ],
                     use_container_width=True,
@@ -1029,6 +1114,7 @@ else:
             "RVOL_10D", "VWAP%", "FlowBias", "Squeeze?", "LowFloat?",
             "Short % Float", "Sector", "Industry", "Catalyst", "MTF_Trend",
             "AI_Commentary", "Sentiment", "Entry_Confidence", "Breakout_Confirm",
+            "AI_Target", "AI_Stop", "AI_RR", "AI_Trade_Reason",
         ]
         csv_cols = [c for c in csv_cols if c in df.columns]
 
@@ -1040,6 +1126,7 @@ else:
         )
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
