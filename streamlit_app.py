@@ -707,10 +707,19 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
                     pub = datetime.fromtimestamp(news[0]["providerPublishTime"], tz=timezone.utc)
                     catalyst = (datetime.now(timezone.utc) - pub).days <= 3
 
-                    # V11: sentiment scoring from news
-                    title = news[0].get("title", "")
-                    summary = news[0].get("summary", "")
-                    sentiment_score_val = news_sentiment_score(title, summary)
+               # V11: sentiment scoring from multiple recent news items
+                sent_vals = []
+
+                for n in news[:5]:  # analyze up to 5 recent articles
+                    t = n.get("title", "")
+                    s = n.get("summary", "")
+                    sent_vals.append(news_sentiment_score(t, s))
+
+                if sent_vals:
+                    sentiment_score_val = round(sum(sent_vals) / len(sent_vals), 2)
+                else:
+                    sentiment_score_val = 0.0
+
             except Exception:
                 pass
 
