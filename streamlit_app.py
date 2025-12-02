@@ -985,60 +985,60 @@ else:
 
             c1.write(f"🎯 AI Target: **${ai_target}**")
             c1.write(f"🛑 AI Stop: **${ai_stop}**")
-            # --- Risk to Reward ---
-try:
-    rr = (ai_target - price_val) / max(0.01, (price_val - ai_stop))
-    rr_text = f"{rr:.2f} : 1"
-except Exception:
-    rr = None
-    rr_text = "—"
-
-c1.write(f"📈 R:R: **{rr_text}**")
-
-# --- AI Explanation for Targets/Stops ---
-ai_expl_list = []
-
-# Breakout confirmation
-if bci_val >= 70:
-    ai_expl_list.append("Breakout structure strongly confirmed.")
-elif bci_val >= 50:
-    ai_expl_list.append("Moderate breakout confirmation present.")
-else:
-    ai_expl_list.append("Weak confirmation — target conservative.")
-
-# Entry timing
-if entry_val >= 70:
-    ai_expl_list.append("Entry confidence high; tape favoring long entries.")
-elif entry_val >= 50:
-    ai_expl_list.append("Entry timing acceptable.")
-else:
-    ai_expl_list.append("Entry window uncertain; volatility elevated.")
-
-# VWAP positioning
-if row["VWAP%"] is not None:
-    if row["VWAP%"] > 0:
-        ai_expl_list.append("Price holding above VWAP (bullish positioning).")
-    else:
-        ai_expl_list.append("Below VWAP — higher risk of failed breakout.")
-
-# 10-day trend
-if row["10D%"] is not None:
-    if row["10D%"] > 0:
-        ai_expl_list.append("10-day trend supportive.")
-    else:
-        ai_expl_list.append("10-day trend weak — target reduced.")
-
-# Order Flow Bias
-flow = row.get("FlowBias", None)
-if flow is not None:
-    if flow > 0.6:
-        ai_expl_list.append("Buyers absorbing dips; strong participation.")
-    elif flow < 0.4:
-        ai_expl_list.append("Sellers active — cautious stop placement.")
-
-# Final AI narrative
-ai_target_expl = " ".join(ai_expl_list)
-c1.markdown(f"🧠 **AI Target Rationale:** {ai_target_expl}")
+           
+            try:
+                rr = (ai_target - price_val) / max(0.01, (price_val - ai_stop))
+                rr_text = f"{rr:.2f} : 1"
+            except Exception:
+                rr = None
+                rr_text = "—"
+            
+            c1.write(f"📈 R:R: **{rr_text}**")
+            
+            # --- AI Explanation for Targets/Stops ---
+            ai_expl_list = []
+            
+            # Breakout confirmation
+            if bci_val >= 70:
+                ai_expl_list.append("Breakout structure strongly confirmed.")
+            elif bci_val >= 50:
+                ai_expl_list.append("Moderate breakout confirmation present.")
+            else:
+                ai_expl_list.append("Weak confirmation — target conservative.")
+            
+            # Entry timing
+            if entry_val >= 70:
+                ai_expl_list.append("Entry confidence high; tape favoring long entries.")
+            elif entry_val >= 50:
+                ai_expl_list.append("Entry timing acceptable.")
+            else:
+                ai_expl_list.append("Entry window uncertain; volatility elevated.")
+            
+            # VWAP positioning
+            if row["VWAP%"] is not None:
+                if row["VWAP%"] > 0:
+                    ai_expl_list.append("Price holding above VWAP (bullish positioning).")
+                else:
+                    ai_expl_list.append("Below VWAP — higher risk of failed breakout.")
+            
+            # 10-day trend
+            if row["10D%"] is not None:
+                if row["10D%"] > 0:
+                    ai_expl_list.append("10-day trend supportive.")
+                else:
+                    ai_expl_list.append("10-day trend weak — target reduced.")
+            
+            # Order Flow Bias
+            flow = row.get("FlowBias", None)
+            if flow is not None:
+                if flow > 0.6:
+                    ai_expl_list.append("Buyers absorbing dips; strong participation.")
+                elif flow < 0.4:
+                    ai_expl_list.append("Sellers active — cautious stop placement.")
+            
+            # Final AI narrative
+            ai_target_expl = " ".join(ai_expl_list)
+            c1.markdown(f"🧠 **AI Target Rationale:** {ai_target_expl}")
 
 
             # Column 2: Momentum snapshot + confirmation
