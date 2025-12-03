@@ -26,13 +26,15 @@ if "auto_refresh_enabled" not in st.session_state:
 if "auto_refresh_ms" not in st.session_state:
     st.session_state.auto_refresh_ms = AUTO_REFRESH_DEFAULT
 
-# Champion seed state
+# champion / seed universe state
 if "seed_universe" not in st.session_state:
-    st.session_state.seed_universe = None
-if "seed_signature" not in st.session_state:
-    st.session_state.seed_signature = None
-if "last_seed_time" not in st.session_state:
-    st.session_state.last_seed_time = None
+    st.session_state.seed_universe = []
+if "seed_universe_created_at" not in st.session_state:
+    st.session_state.seed_universe_created_at = None
+if "seed_universe_size" not in st.session_state:
+    st.session_state.seed_universe_size = 0
+if "seed_universe_mode" not in st.session_state:
+    st.session_state.seed_universe_mode = None
 
 # ========================= AUTO REFRESH (V11 streaming aware) =========================
 if st.session_state.auto_refresh_enabled:
@@ -220,17 +222,21 @@ with st.sidebar:
         st.cache_data.clear()
         if "last_df" in st.session_state:
             del st.session_state["last_df"]
+        st.session_state.seed_universe = []
+        st.session_state.seed_universe_created_at = None
+        st.session_state.seed_universe_size = 0
+        st.session_state.seed_universe_mode = None
         if "alerted" in st.session_state:
             st.session_state.alerted = set()
-        st.session_state.seed_universe = None
-        st.session_state.seed_signature = None
-        st.session_state.last_seed_time = datetime.now(timezone.utc).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
         st.success("New seed will be used on the next scan.")
 
-    if st.session_state.last_seed_time:
-        st.caption(f"Last seeded: {st.session_state.last_seed_time}")
+    # Small display of last seed info (additive, doesn't change core UI)
+    if st.session_state.seed_universe_created_at:
+        st.caption(
+            f"Last seed: {st.session_state.seed_universe_created_at} • "
+            f"Size: {st.session_state.seed_universe_size} • "
+            f"Mode: {st.session_state.seed_universe_mode}"
+        )
 
     st.markdown("---")
     if st.button("🧹 Refresh Now"):
@@ -303,6 +309,7 @@ def build_universe(
     """
     Return a list of symbol dicts to scan, based on:
     - Watchlist
+    - Cached champion seed universe (V12)
     - Classic alphabetical slice
     - Randomized slice
     - Live volume-ranked (V9)
@@ -313,15 +320,20 @@ def build_universe(
         tickers = sorted(set(s.upper() for s in raw if s.strip()))
         return [{"Symbol": t, "Exchange": "WATCH"} for t in tickers]
 
+    # ✅ V12: if we already have a seeded / champion universe, reuse it
+    if st.session_state.seed_universe:
+        # Just honor max_universe slice, but do NOT reshuffle; this keeps champions stable
+        return st.session_state.seed_universe[:max_universe]
+
     syms = load_symbols()
 
-    # V9 modes
+    # V9 modes (only used the first time, to create the seed_universe)
     if universe_mode == "Randomized Slice":
         base = syms[:]
         random.shuffle(base)
-        return base[:max_universe]
+        universe = base[:max_universe]
 
-    if universe_mode == "Live Volume Ranked (slower)":
+    elif universe_mode == "Live Volume Ranked (slower)":
         base = syms[:volume_rank_pool]
         ranked = []
         for sym in base:
@@ -337,17 +349,27 @@ def build_universe(
 
         if not ranked:
             # fallback to classic if volume fetch fails
-            return syms[:max_universe]
+            universe = syms[:max_universe]
+        else:
+            ranked_sorted = sorted(
+                ranked,
+                key=lambda x: x.get("LiveVol", 0.0),
+                reverse=True
+            )
+            universe = ranked_sorted[:max_universe]
+    else:
+        # Classic (V8 behavior)
+        universe = syms[:max_universe]
 
-        ranked_sorted = sorted(
-            ranked,
-            key=lambda x: x.get("LiveVol", 0.0),
-            reverse=True
-        )
-        return ranked_sorted[:max_universe]
+    # Store champion / seed universe in session so it persists across refreshes
+    st.session_state.seed_universe = universe
+    st.session_state.seed_universe_size = len(universe)
+    st.session_state.seed_universe_mode = universe_mode
+    st.session_state.seed_universe_created_at = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
 
-    # Classic (V8 behavior)
-    return syms[:max_universe]
+    return universe
 
 
 # ========================= SCORING (10-DAY MODEL) =========================
@@ -868,40 +890,16 @@ def run_scan(
     """
     V11/V12 lightning engine:
     - parallel scan via ThreadPool
-    - universe constructed by build_universe or from champion seed
+    - universe constructed by build_universe
     - optional ignoring of filters for watchlist handled by wrapper logic
     - vwap_enabled_flag controls VWAP bonus in scoring
     """
-    # Watchlist → always build fresh universe; no champion seeding here
-    if watchlist_text.strip():
-        universe = build_universe(
-            watchlist_text,
-            max_universe,
-            universe_mode,
-            volume_rank_pool,
-        )
-    else:
-        # Champion seeding: keep same symbol set until user forces new seed
-        # or universe configuration changes
-        sig = (universe_mode, max_universe, volume_rank_pool)
-        if (
-            st.session_state.seed_universe is None
-            or st.session_state.seed_signature != sig
-        ):
-            universe = build_universe(
-                watchlist_text,
-                max_universe,
-                universe_mode,
-                volume_rank_pool,
-            )
-            st.session_state.seed_universe = universe
-            st.session_state.seed_signature = sig
-            st.session_state.last_seed_time = datetime.now(timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S UTC"
-            )
-        else:
-            universe = st.session_state.seed_universe
-
+    universe = build_universe(
+        watchlist_text,
+        max_universe,
+        universe_mode,
+        volume_rank_pool,
+    )
     results = []
 
     # If ignoring filters for watchlist and watchlist is populated,
@@ -1225,6 +1223,7 @@ else:
         )
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
