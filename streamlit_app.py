@@ -20,27 +20,27 @@ DEFAULT_MAX_PRICE     = 5.0
 DEFAULT_MIN_VOLUME    = 100_000
 DEFAULT_MIN_BREAKOUT  = 0.0
 
-# ========================= SESSION STATE FOR V11 STREAMING =========================
+# ========================= SESSION STATE FOR V11/V12 STREAMING =========================
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = True
 if "auto_refresh_ms" not in st.session_state:
     st.session_state.auto_refresh_ms = AUTO_REFRESH_DEFAULT
 
-# ========================= AUTO REFRESH (V11 streaming aware) =========================
+# ========================= AUTO REFRESH (V11/V12 streaming aware) =========================
 if st.session_state.auto_refresh_enabled:
-    st_autorefresh(interval=st.session_state.auto_refresh_ms, key="refresh_v11")
+    st_autorefresh(interval=st.session_state.auto_refresh_ms, key="refresh_v12")
 
 # ========================= PAGE SETUP =========================
 st.set_page_config(
-    page_title="V11 – 10-Day Momentum Screener (Hybrid Volume/Randomized + ML/AI)",
+    page_title="V12 – 10-Day Momentum Screener (Hybrid Volume/Randomized + ML/AI)",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("🚀 V11 — 10-Day Momentum Breakout Screener (Hybrid Speed + Volume + Randomized + ML/AI)")
+st.title("🚀 V12 — 10-Day Momentum Breakout Screener (Hybrid Speed + Volume + Randomized + ML/AI)")
 st.caption(
     "Short-window model • EMA10 • RSI(7) • 3D & 10D momentum • 10D RVOL • "
-    "VWAP + order flow • Watchlist mode • Audio alerts • V9/V10/V11 universe modes "
+    "VWAP + order flow • Watchlist mode • Audio alerts • V9/V10/V11/V12 universe modes "
     "(classic / random / volume-ranked) • Live volume • ML-style probability • AI commentary"
 )
 
@@ -55,11 +55,12 @@ with st.sidebar:
         help="Example: AAPL, TSLA, NVDA, AMD",
     )
 
+    # Champion / universe size up to 2000
     max_universe = st.slider(
         "Max symbols to scan when no watchlist",
         min_value=50,
-        max_value=600,
-        value=2000,
+        max_value=2000,        # 🔥 allow up to 2000
+        value=2000,            # 🔥 default seed size 2000
         step=50,
         help="Keeps scans fast when you don't use a custom watchlist.",
     )
@@ -104,7 +105,7 @@ with st.sidebar:
     min_volume = st.number_input("Min Daily Volume", 0, 10_000_000, DEFAULT_MIN_VOLUME, 10_000)
     min_breakout = st.number_input("Min Breakout Score", -50.0, 200.0, 0.0, 1.0)
 
-    # ✅ NEW: Min Breakout Confirmation & Entry Confidence filters (directly under breakout)
+    # ✅ Min Breakout Confirmation & Entry Confidence filters (directly under breakout)
     min_breakout_confirm = st.number_input(
         "Min Breakout Confirmation (0–100)",
         min_value=0.0,
@@ -155,7 +156,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🔊 Audio Alert Thresholds")
 
-    # 🔇 V10+V11: alerts default to disabled
+    # 🔇 V10+V11+V12: alerts default to disabled
     enable_alerts = st.checkbox(
         "Enable Audio + Alert Banner",
         value=False,
@@ -167,8 +168,8 @@ with st.sidebar:
     ALERT_VWAP_THRESHOLD = st.slider("Alert when VWAP Dist % ≥", 1, 50, 2, 1)
 
     st.markdown("---")
-    # V11 streaming controls
-    st.subheader("V11 Streaming Controls")
+    # V11/V12 streaming controls
+    st.subheader("V12 Streaming Controls")
     auto_refresh_enabled = st.checkbox(
         "Enable Auto-Refresh (Streaming)",
         value=st.session_state.auto_refresh_enabled,
@@ -187,16 +188,23 @@ with st.sidebar:
 
     # V11: pre-open scanning mode
     preopen_mode = st.checkbox(
-        "Pre-Open Scan Mode (V11)",
+        "Pre-Open Scan Mode (V11/V12)",
         value=False,
         help="Emphasize premarket moves & volume; de-emphasize longer-term trend."
     )
 
     # V11: universe caching persistence
     use_last_results = st.checkbox(
-        "Use last scan results (no rescan, V11)",
+        "Use last scan results (no rescan, V11/V12)",
         value=False,
         help="Use cached universe from prior run instead of rescanning."
+    )
+
+    # 🔥 V12: force reseed of champions / universe even if last results exist
+    force_new_seed = st.checkbox(
+        "Force New Seed (V12)",
+        value=False,
+        help="Ignore cached results and rebuild the scan universe from scratch."
     )
 
     st.markdown("---")
@@ -370,7 +378,7 @@ def short_window_score(pm, yday, m3, m10, rsi7, rvol10, catalyst, squeeze, vwap,
 
 def ml_breakout_probability(score: float, rvol10, pm, m10) -> float:
     """
-    V11: 'ML-style' probability-like number, using a richer feature mix
+    V11/V12: 'ML-style' probability-like number, using a richer feature mix
     but kept lightweight (no external libraries).
     """
     try:
@@ -409,7 +417,7 @@ def multi_timeframe_label(pm, m3, m10):
 
 def news_sentiment_score(title: str, summary: str | None = None) -> float:
     """
-    V11: very lightweight sentiment scorer using keywords.
+    V11/V12: very lightweight sentiment scorer using keywords.
     Returns value in roughly [-1, 1].
     """
     text = (title or "") + " " + (summary or "")
@@ -442,7 +450,7 @@ def news_sentiment_score(title: str, summary: str | None = None) -> float:
 
 def entry_confidence_score(vwap_dist, rvol10, flow_bias) -> float:
     """
-    V11: Entry timing confidence 0–100 based on VWAP distance, RVOL, and OFB.
+    V11/V12: Entry timing confidence 0–100 based on VWAP distance, RVOL, and OFB.
     Idea: modestly above VWAP, good RVOL, buy-dominant order flow → higher score.
     """
     if vwap_dist is None or rvol10 is None or flow_bias is None:
@@ -470,7 +478,7 @@ def entry_confidence_score(vwap_dist, rvol10, flow_bias) -> float:
 
 def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
     """
-    V11: Breakout confirmation index 0–100 combining score, RVOL, PM, and 10D trend.
+    V11/V12: Breakout confirmation index 0–100 combining score, RVOL, PM, and 10D trend.
     """
     base = (score or 0) / 2.0  # 0–100 if score ~ 0–200
     if rvol10 is not None:
@@ -483,7 +491,7 @@ def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
     return round(max(0.0, min(100.0, base)), 1)
 
 
-# ========================= SIMPLE AI COMMENTARY (V11 upgraded) =========================
+# ========================= SIMPLE AI COMMENTARY (V11/V12 upgraded) =========================
 def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_conf, bci, preopen_mode):
     comments = []
 
@@ -616,7 +624,7 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
                 total = buy_vol + sell_vol
                 if total > 0:
                     order_flow_bias = buy_vol / total  # 0..1
-               
+
         # --- FIX: True premarket price override when 2m bars are missing ---
         try:
             fi = stock.fast_info
@@ -626,7 +634,7 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
             if pre_price and prev_close and prev_close > 0:
                 calc_pm = (pre_price - prev_close) / prev_close * 100
 
-                # Only override during premarket hours (before 9:30am ET)
+                # Only override during premarket hours (before 9:30am ET ~ 14:30 UTC)
                 now = datetime.now(timezone.utc)
                 if now.hour < 14 or (now.hour == 14 and now.minute < 30):
                     premarket_pct = round(calc_pm, 2)
@@ -707,9 +715,8 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
                     pub = datetime.fromtimestamp(news[0]["providerPublishTime"], tz=timezone.utc)
                     catalyst = (datetime.now(timezone.utc) - pub).days <= 3
 
-               # V11: sentiment scoring from multiple recent news items
+                # V11/V12: sentiment scoring from multiple recent news items
                 sent_vals = []
-
                 for n in news[:5]:  # analyze up to 5 recent articles
                     t = n.get("title", "")
                     s = n.get("summary", "")
@@ -742,7 +749,7 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
         )
         prob_rise = ml_breakout_probability(score, rvol10, premarket_pct, m10)
 
-        # V11: entry timing & breakout confirmation index
+        # V11/V12: entry timing & breakout confirmation index
         entry_conf = entry_confidence_score(vwap_dist, rvol10, order_flow_bias)
         bci = breakout_confirmation_index(score, rvol10, premarket_pct, m10)
 
@@ -810,7 +817,7 @@ def run_scan(
     ignore_filters_for_watchlist_flag: bool,
 ):
     """
-    V11 lightning engine:
+    V11/V12 lightning engine:
     - parallel scan via ThreadPool
     - universe constructed by build_universe
     - optional ignoring of filters for watchlist handled by wrapper logic
@@ -913,8 +920,9 @@ def trigger_audio_alert(symbol: str, reason: str):
 
 
 # ========================= MAIN DISPLAY =========================
-with st.spinner("Scanning (10-day momentum, V11 hybrid universe)…"):
-    if use_last_results and "last_df" in st.session_state:
+with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
+    # Use last results only if enabled AND not forcing new seed
+    if use_last_results and "last_df" in st.session_state and not force_new_seed:
         df = st.session_state["last_df"].copy()
     else:
         df = run_scan(
@@ -960,9 +968,9 @@ else:
     else:
         df = df.sort_values(by=["Score", "PM%", "RSI7"], ascending=[False, False, False])
 
-        st.subheader(f"🔥 10-Day Momentum Board (V11) — {len(df)} symbols")
+        st.subheader(f"🔥 10-Day Momentum Board (V12) — {len(df)} symbols")
 
-        # 🔔 Alert banner (V9+V10+V11)
+        # 🔔 Alert banner (V9+V10+V11+V12)
         if enable_alerts and st.session_state.alerted:
             alerted_list = ", ".join(sorted(st.session_state.alerted))
             st.info(f"🔔 Active alert symbols: {alerted_list}")
@@ -1010,19 +1018,19 @@ else:
 
             c1.write(f"🎯 AI Target: **${ai_target}**")
             c1.write(f"🛑 AI Stop: **${ai_stop}**")
-           
+
             try:
                 rr = (ai_target - price_val) / max(0.01, (price_val - ai_stop))
                 rr_text = f"{rr:.2f} : 1"
             except Exception:
                 rr = None
                 rr_text = "—"
-            
+
             c1.write(f"📈 R:R: **{rr_text}**")
-            
+
             # --- AI Explanation for Targets/Stops ---
             ai_expl_list = []
-            
+
             # Breakout confirmation
             if bci_val >= 70:
                 ai_expl_list.append("Breakout structure strongly confirmed.")
@@ -1030,7 +1038,7 @@ else:
                 ai_expl_list.append("Moderate breakout confirmation present.")
             else:
                 ai_expl_list.append("Weak confirmation — target conservative.")
-            
+
             # Entry timing
             if entry_val >= 70:
                 ai_expl_list.append("Entry confidence high; tape favoring long entries.")
@@ -1038,21 +1046,21 @@ else:
                 ai_expl_list.append("Entry timing acceptable.")
             else:
                 ai_expl_list.append("Entry window uncertain; volatility elevated.")
-            
+
             # VWAP positioning
             if row["VWAP%"] is not None:
                 if row["VWAP%"] > 0:
                     ai_expl_list.append("Price holding above VWAP (bullish positioning).")
                 else:
                     ai_expl_list.append("Below VWAP — higher risk of failed breakout.")
-            
+
             # 10-day trend
             if row["10D%"] is not None:
                 if row["10D%"] > 0:
                     ai_expl_list.append("10-day trend supportive.")
                 else:
                     ai_expl_list.append("10-day trend weak — target reduced.")
-            
+
             # Order Flow Bias
             flow = row.get("FlowBias", None)
             if flow is not None:
@@ -1060,11 +1068,10 @@ else:
                     ai_expl_list.append("Buyers absorbing dips; strong participation.")
                 elif flow < 0.4:
                     ai_expl_list.append("Sellers active — cautious stop placement.")
-            
+
             # Final AI narrative
             ai_target_expl = " ".join(ai_expl_list)
             c1.markdown(f"🧠 **AI Target Rationale:** {ai_target_expl}")
-
 
             # Column 2: Momentum snapshot + confirmation
             c2.write(f"PM%: {row['PM%']}")
@@ -1096,7 +1103,7 @@ else:
 
             st.divider()
 
-        # V11: Watchlist multi-view panels
+        # V11/V12: Watchlist multi-view panels
         raw_watch = watchlist_text.strip()
         if raw_watch:
             raw = raw_watch.replace("\n", " ").replace(",", " ").split()
@@ -1104,7 +1111,7 @@ else:
             wl_df = df[df["Symbol"].isin(wl_tickers)]
 
             if not wl_df.empty:
-                st.subheader("📋 Watchlist Multi-View (V11)")
+                st.subheader("📋 Watchlist Multi-View (V11/V12)")
                 st.dataframe(
                     wl_df[
                         [
@@ -1138,11 +1145,12 @@ else:
         st.download_button(
             "📥 Download Screener CSV",
             data=df[csv_cols].to_csv(index=False),
-            file_name="v11_10day_momentum_screener_hybrid_ml_ai.csv",
+            file_name="v12_10day_momentum_screener_hybrid_ml_ai.csv",
             mime="text/csv",
         )
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
