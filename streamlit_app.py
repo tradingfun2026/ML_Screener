@@ -26,11 +26,13 @@ if "auto_refresh_enabled" not in st.session_state:
 if "auto_refresh_ms" not in st.session_state:
     st.session_state.auto_refresh_ms = AUTO_REFRESH_DEFAULT
 
-# Champion seed universe state
+# Champion seed state
 if "seed_universe" not in st.session_state:
     st.session_state.seed_universe = None
-if "seed_meta" not in st.session_state:
-    st.session_state.seed_meta = None
+if "seed_signature" not in st.session_state:
+    st.session_state.seed_signature = None
+if "last_seed_time" not in st.session_state:
+    st.session_state.last_seed_time = None
 
 # ========================= AUTO REFRESH (V11 streaming aware) =========================
 if st.session_state.auto_refresh_enabled:
@@ -220,10 +222,15 @@ with st.sidebar:
             del st.session_state["last_df"]
         if "alerted" in st.session_state:
             st.session_state.alerted = set()
-        # Clear champion seed so next scan fully reseeds
         st.session_state.seed_universe = None
-        st.session_state.seed_meta = None
+        st.session_state.seed_signature = None
+        st.session_state.last_seed_time = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
         st.success("New seed will be used on the next scan.")
+
+    if st.session_state.last_seed_time:
+        st.caption(f"Last seeded: {st.session_state.last_seed_time}")
 
     st.markdown("---")
     if st.button("🧹 Refresh Now"):
@@ -861,14 +868,12 @@ def run_scan(
     """
     V11/V12 lightning engine:
     - parallel scan via ThreadPool
-    - universe constructed by build_universe
-    - champion 'seed_universe' persisted in session_state for non-watchlist runs
+    - universe constructed by build_universe or from champion seed
+    - optional ignoring of filters for watchlist handled by wrapper logic
     - vwap_enabled_flag controls VWAP bonus in scoring
     """
-    wl = watchlist_text.strip()
-
-    if wl:
-        # For watchlists, always build direct from watchlist (no seeding logic)
+    # Watchlist → always build fresh universe; no champion seeding here
+    if watchlist_text.strip():
         universe = build_universe(
             watchlist_text,
             max_universe,
@@ -876,27 +881,26 @@ def run_scan(
             volume_rank_pool,
         )
     else:
-        # Champion seed universe logic
-        seed = st.session_state.get("seed_universe", None)
-        needs_new_seed = seed is None or len(seed) < max_universe
-
-        if needs_new_seed:
+        # Champion seeding: keep same symbol set until user forces new seed
+        # or universe configuration changes
+        sig = (universe_mode, max_universe, volume_rank_pool)
+        if (
+            st.session_state.seed_universe is None
+            or st.session_state.seed_signature != sig
+        ):
             universe = build_universe(
                 watchlist_text,
                 max_universe,
                 universe_mode,
                 volume_rank_pool,
             )
-            # store as champion seed universe
             st.session_state.seed_universe = universe
-            st.session_state.seed_meta = {
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "size": len(universe),
-                "mode": universe_mode,
-            }
+            st.session_state.seed_signature = sig
+            st.session_state.last_seed_time = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            )
         else:
-            # reuse champion seed, trim to current max_universe if necessary
-            universe = seed[:max_universe]
+            universe = st.session_state.seed_universe
 
     results = []
 
@@ -906,7 +910,7 @@ def run_scan(
     saved_min_volume = min_volume
     saved_max_price = max_price
 
-    if ignore_filters_for_watchlist_flag and wl:
+    if ignore_filters_for_watchlist_flag and watchlist_text.strip():
         min_volume = 0
         max_price = 10_000.0  # effectively disable
 
@@ -1221,6 +1225,7 @@ else:
         )
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
