@@ -20,7 +20,7 @@ DEFAULT_MAX_PRICE     = 5.0
 DEFAULT_MIN_VOLUME    = 100_000
 DEFAULT_MIN_BREAKOUT  = 0.0
 
-CHAMPION_SIZE         = 2000         # V12: top-scoring champion universe size
+CHAMPION_SEED_SIZE    = 2000         # V12: always seed at least 2000 symbols
 
 # ========================= SESSION STATE FOR V11/V12 STREAMING =========================
 if "auto_refresh_enabled" not in st.session_state:
@@ -28,15 +28,9 @@ if "auto_refresh_enabled" not in st.session_state:
 if "auto_refresh_ms" not in st.session_state:
     st.session_state.auto_refresh_ms = AUTO_REFRESH_DEFAULT
 
-# V12: champion seed session state
-if "seed_universe" not in st.session_state:
-    st.session_state.seed_universe = None
-if "seed_timestamp" not in st.session_state:
-    st.session_state.seed_timestamp = None
-
 # ========================= AUTO REFRESH (V11 streaming aware) =========================
 if st.session_state.auto_refresh_enabled:
-    st_autorefresh(interval=st.session_state.auto_refresh_ms, key="refresh_v12")
+    st_autorefresh(interval=st.session_state.auto_refresh_ms, key="refresh_v11")
 
 # ========================= PAGE SETUP =========================
 st.set_page_config(
@@ -45,11 +39,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🚀 V12 — 10-Day Momentum Breakout Screener (Hybrid Speed + Volume + Randomized + ML/AI + Seed)")
+st.title("🚀 V12 — 10-Day Momentum Breakout Screener (Hybrid Speed + Volume + Randomized + ML/AI)")
 st.caption(
     "Short-window model • EMA10 • RSI(7) • 3D & 10D momentum • 10D RVOL • "
     "VWAP + order flow • Watchlist mode • Audio alerts • V9/V10/V11/V12 universe modes "
-    "(classic / random / volume-ranked / seeded champions) • Live volume • ML-style probability • AI commentary"
+    "(classic / random / volume-ranked) • Live volume • ML-style probability • AI commentary • Seeded universe"
 )
 
 # ========================= SIDEBAR CONTROLS =========================
@@ -63,11 +57,12 @@ with st.sidebar:
         help="Example: AAPL, TSLA, NVDA, AMD",
     )
 
+    # NOTE: This slider controls how many *from the seed* you scan each pass.
     max_universe = st.slider(
-        "Max symbols to scan when no watchlist",
+        "Max symbols to scan (from seed or watchlist)",
         min_value=50,
-        max_value=2000,   # fixed so value <= max
-        value=600,
+        max_value=CHAMPION_SEED_SIZE,
+        value=CHAMPION_SEED_SIZE,
         step=50,
         help="Keeps scans fast when you don't use a custom watchlist.",
     )
@@ -93,10 +88,17 @@ with st.sidebar:
     volume_rank_pool = st.slider(
         "Max symbols to consider when volume-ranking (V9)",
         min_value=100,
-        max_value=2000,
+        max_value=CHAMPION_SEED_SIZE,
         value=600,
         step=100,
-        help="Used only when 'Live Volume Ranked (slower)' is selected.",
+        help="Used only when 'Live Volume Ranked (slower)' is selected (from the seed).",
+    )
+
+    # V12: Force new seed checkbox (rebuild 2000-symbol champion universe)
+    force_new_seed = st.checkbox(
+        "Force New Seed (V12)",
+        value=False,
+        help="Rebuild the 2000-symbol champion universe for this session.",
     )
 
     enable_enrichment = st.checkbox(
@@ -112,7 +114,7 @@ with st.sidebar:
     min_volume = st.number_input("Min Daily Volume", 0, 10_000_000, DEFAULT_MIN_VOLUME, 10_000)
     min_breakout = st.number_input("Min Breakout Score", -50.0, 200.0, 0.0, 1.0)
 
-    # ✅ NEW: Min Breakout Confirmation & Entry Confidence filters (directly under breakout)
+    # ✅ Min Breakout Confirmation & Entry Confidence filters (under breakout)
     min_breakout_confirm = st.number_input(
         "Min Breakout Confirmation (0–100)",
         min_value=0.0,
@@ -134,6 +136,8 @@ with st.sidebar:
 
     squeeze_only = st.checkbox("Short-Squeeze Only")
     catalyst_only = st.checkbox("Must Have News/Earnings")
+
+    # VWAP-only filter; **VWAP filters are disabled unless this is checked**
     vwap_only = st.checkbox("Above VWAP Only (VWAP% > 0)")
 
     # 🔁 V9: optional order-flow bias filter
@@ -208,29 +212,15 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    # V12: champion seed controls
-    st.subheader("V12 Champion Seed (Top 2000)")
-    use_seed_universe = st.checkbox(
-        "Use V12 Champion Seed Universe",
-        value=False,
-        help="When ON (and no watchlist), scans only the top 2000 symbols from the last seeding run."
-    )
-
-    reseed_now = st.button(
-        "♻️ Reseed Champion Universe (V12)",
-        help="Rebuild the champion universe from the full symbol list."
-    )
-
-    # Show last seed timestamp if available
-    if st.session_state.seed_timestamp:
-        st.caption(f"Last seed update: {st.session_state.seed_timestamp}")
-
-    st.markdown("---")
     if st.button("🧹 Refresh Now"):
         st.cache_data.clear()
         if "last_df" in st.session_state:
             del st.session_state["last_df"]
-        st.success("Cache cleared — fresh scan will run now.")
+        if "seed_universe" in st.session_state:
+            del st.session_state["seed_universe"]
+        if "seed_timestamp" in st.session_state:
+            del st.session_state["seed_timestamp"]
+        st.success("Cache + seed cleared — fresh scan and seed will run now.")
 
 # ========================= SYMBOL LOAD =========================
 @st.cache_data(ttl=900)
@@ -287,18 +277,34 @@ def load_symbols():
     return df.to_dict("records")
 
 
+def get_or_build_seed_universe(all_syms, force_new: bool) -> list:
+    """
+    V12: maintain a 2000-symbol 'champion' seed universe in session_state.
+    - all_syms: full symbol list from load_symbols()
+    - force_new: if True, rebuild the seed now.
+    """
+    if ("seed_universe" not in st.session_state) or force_new:
+        base = all_syms[:]
+        random.shuffle(base)
+        st.session_state["seed_universe"] = base[:CHAMPION_SEED_SIZE]
+        st.session_state["seed_timestamp"] = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    return st.session_state["seed_universe"]
+
+
 def build_universe(
     watchlist_text: str,
     max_universe: int,
     universe_mode: str,
     volume_rank_pool: int,
+    force_new_seed_flag: bool,
 ):
     """
     Return a list of symbol dicts to scan, based on:
-    - Watchlist
-    - Classic alphabetical slice
-    - Randomized slice
-    - Live volume-ranked (V9)
+    - Watchlist (takes precedence)
+    - Seeded 2000-symbol universe (V12)
+      within which we apply Classic / Randomized / Live volume-ranked behavior.
     """
     wl = watchlist_text.strip()
     if wl:
@@ -306,16 +312,18 @@ def build_universe(
         tickers = sorted(set(s.upper() for s in raw if s.strip()))
         return [{"Symbol": t, "Exchange": "WATCH"} for t in tickers]
 
-    syms = load_symbols()
+    full_syms = load_symbols()
+    seed_syms = get_or_build_seed_universe(full_syms, force_new_seed_flag)
 
-    # V9 modes
+    # V9 modes applied *within* the seed universe
     if universe_mode == "Randomized Slice":
-        base = syms[:]
+        base = seed_syms[:]
         random.shuffle(base)
         return base[:max_universe]
 
     if universe_mode == "Live Volume Ranked (slower)":
-        base = syms[:volume_rank_pool]
+        # rank within seed universe, up to volume_rank_pool
+        base = seed_syms[:min(len(seed_syms), volume_rank_pool)]
         ranked = []
         for sym in base:
             try:
@@ -330,7 +338,7 @@ def build_universe(
 
         if not ranked:
             # fallback to classic if volume fetch fails
-            return syms[:max_universe]
+            return seed_syms[:max_universe]
 
         ranked_sorted = sorted(
             ranked,
@@ -339,8 +347,8 @@ def build_universe(
         )
         return ranked_sorted[:max_universe]
 
-    # Classic (V8 behavior)
-    return syms[:max_universe]
+    # Classic (V8 behavior) within seed
+    return seed_syms[:max_universe]
 
 
 # ========================= SCORING (10-DAY MODEL) =========================
@@ -652,7 +660,7 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
             if pre_price and prev_close and prev_close > 0:
                 calc_pm = (pre_price - prev_close) / prev_close * 100
 
-                # Only override during premarket hours (before ~9:30am ET ≈ 14:30 UTC)
+                # Only override during premarket hours (before ~9:30am ET -> 14:30 UTC)
                 now = datetime.now(timezone.utc)
                 if now.hour < 14 or (now.hour == 14 and now.minute < 30):
                     premarket_pct = round(calc_pm, 2)
@@ -663,7 +671,7 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
         if live_intraday_volume is None:
             live_intraday_volume = daily_vol_last
 
-        # Price/volume filters (may be ignored for watchlist via wrapper logic)
+        # Price/volume filters (may be ignored for watchlist via wrapper logic, not here)
         if price > max_price or live_intraday_volume < min_volume:
             return None
 
@@ -733,13 +741,12 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
                     pub = datetime.fromtimestamp(news[0]["providerPublishTime"], tz=timezone.utc)
                     catalyst = (datetime.now(timezone.utc) - pub).days <= 3
 
-                # V11: sentiment scoring from multiple recent news items
+                # V11/V12: sentiment scoring from multiple recent news items
                 sent_vals = []
-                for n in news[:5]:  # analyze up to 5 recent articles
+                for n in news[:5]:
                     t = n.get("title", "")
                     s = n.get("summary", "")
                     sent_vals.append(news_sentiment_score(t, s))
-
                 if sent_vals:
                     sentiment_score_val = round(sum(sent_vals) / len(sent_vals), 2)
                 else:
@@ -822,60 +829,6 @@ def scan_one(sym, enable_enrichment: bool, enable_ofb_filter: bool, min_ofb: flo
         return None
 
 
-# ========================= V12: CHAMPION SEEDING =========================
-def reseed_champion_universe(enable_enrichment, enable_ofb_filter, min_ofb, preopen_mode):
-    """
-    V12: Build a champion universe from the full symbol list and
-    save the top CHAMPION_SIZE tickers by Score/PM/RSI into session_state.seed_universe.
-    """
-    all_syms = load_symbols()
-    results = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as ex:
-        futures = [
-            ex.submit(
-                scan_one,
-                sym,
-                enable_enrichment,
-                enable_ofb_filter,
-                min_ofb,
-                preopen_mode,
-            )
-            for sym in all_syms
-        ]
-        for f in concurrent.futures.as_completed(futures):
-            res = f.result()
-            if res:
-                results.append(res)
-
-    if not results:
-        st.session_state.seed_universe = None
-        st.session_state.seed_timestamp = None
-        st.warning("Champion reseed found no results. Check filters.")
-        return
-
-    df_seed = pd.DataFrame(results)
-    df_seed = df_seed.sort_values(
-        by=["Score", "PM%", "RSI7"],
-        ascending=[False, False, False]
-    )
-
-    df_seed = df_seed.head(CHAMPION_SIZE)
-
-    # Save champion universe (Symbol + Exchange only)
-    st.session_state.seed_universe = [
-        {"Symbol": row["Symbol"], "Exchange": row["Exchange"]}
-        for _, row in df_seed.iterrows()
-    ]
-
-    # Seed timestamp (simple local string)
-    st.session_state.seed_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Clear last_df so new scans use the champion universe cleanly
-    if "last_df" in st.session_state:
-        del st.session_state["last_df"]
-
-
 @st.cache_data(ttl=6)
 def run_scan(
     watchlist_text: str,
@@ -887,35 +840,21 @@ def run_scan(
     volume_rank_pool: int,
     preopen_mode: bool,
     ignore_filters_for_watchlist_flag: bool,
-    use_seed_universe_flag: bool,
+    force_new_seed_flag: bool,
 ):
     """
-    V11/V12 lightning engine:
+    V12 lightning engine:
     - parallel scan via ThreadPool
-    - universe constructed by build_universe or V12 champion seed
+    - universe constructed by build_universe (seed-aware)
     - optional ignoring of filters for watchlist handled by wrapper logic
     """
-    # Decide universe:
-    # 1) Watchlist always wins if present
-    # 2) Else, if use_seed_universe_flag and seed_universe exists -> use that
-    # 3) Else, normal build_universe
-    if watchlist_text.strip():
-        universe = build_universe(
-            watchlist_text,
-            max_universe,
-            universe_mode,
-            volume_rank_pool,
-        )
-    elif use_seed_universe_flag and st.session_state.get("seed_universe"):
-        universe = st.session_state["seed_universe"]
-    else:
-        universe = build_universe(
-            watchlist_text,
-            max_universe,
-            universe_mode,
-            volume_rank_pool,
-        )
-
+    universe = build_universe(
+        watchlist_text,
+        max_universe,
+        universe_mode,
+        volume_rank_pool,
+        force_new_seed_flag,
+    )
     results = []
 
     # If ignoring filters for watchlist and watchlist is populated,
@@ -1008,19 +947,9 @@ def trigger_audio_alert(symbol: str, reason: str):
 
 
 # ========================= MAIN DISPLAY =========================
-
-# V12: optional reseed BEFORE scanning
-if reseed_now:
-    with st.spinner("Reseeding champion universe (V12) from full symbol list…"):
-        reseed_champion_universe(
-            enable_enrichment=enable_enrichment,
-            enable_ofb_filter=enable_ofb_filter,
-            min_ofb=min_ofb,
-            preopen_mode=preopen_mode,
-        )
-
 with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
-    if use_last_results and "last_df" in st.session_state and not reseed_now:
+    # If we forced a new seed, always rescan (ignore 'use_last_results')
+    if use_last_results and not force_new_seed and "last_df" in st.session_state:
         df = st.session_state["last_df"].copy()
     else:
         df = run_scan(
@@ -1033,7 +962,7 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
             volume_rank_pool,
             preopen_mode,
             ignore_filters_for_watchlist,
-            use_seed_universe,
+            force_new_seed,
         )
         st.session_state["last_df"] = df.copy()
 
@@ -1052,6 +981,8 @@ else:
             df = df[df["Squeeze?"]]
         if catalyst_only:
             df = df[df["Catalyst"]]
+
+        # VWAP filters **only** apply when checkbox enabled
         if vwap_only:
             df = df[df["VWAP%"].fillna(-999) > 0]
 
@@ -1068,6 +999,14 @@ else:
         df = df.sort_values(by=["Score", "PM%", "RSI7"], ascending=[False, False, False])
 
         st.subheader(f"🔥 10-Day Momentum Board (V12) — {len(df)} symbols")
+
+        # V12: show seed universe metadata
+        if "seed_universe" in st.session_state and "seed_timestamp" in st.session_state:
+            seed_count = len(st.session_state["seed_universe"])
+            st.caption(
+                f"V12 Seed Universe: {seed_count} symbols "
+                f"• Last seeded: {st.session_state['seed_timestamp']}"
+            )
 
         # 🔔 Alert banner (V9+V10+V11+V12)
         if enable_alerts and st.session_state.alerted:
@@ -1244,7 +1183,7 @@ else:
         st.download_button(
             "📥 Download Screener CSV",
             data=df[csv_cols].to_csv(index=False),
-            file_name="v12_10day_momentum_screener_hybrid_ml_ai_seed.csv",
+            file_name="v12_10day_momentum_screener_hybrid_ml_ai_seeded.csv",
             mime="text/csv",
         )
 
