@@ -39,7 +39,20 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
 
         # Simple sentiment via keywords
         lower = title.lower()
-        if any(w in lower for w in ["up", "surge", "record", "beat", "beats", "growth", "upgrade", "upgrades", "bull"]):
+        if any(
+            w in lower
+            for w in [
+                "up",
+                "surge",
+                "record",
+                "beat",
+                "beats",
+                "growth",
+                "upgrade",
+                "upgrades",
+                "bull",
+            ]
+        ):
             sentiment = "🟢"
         elif any(
             w in lower
@@ -1434,6 +1447,7 @@ else:
         # =========================================
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
