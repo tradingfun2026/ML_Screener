@@ -9,7 +9,7 @@ import math
 import random
 import re
 
-# === FINVIZ NEWS ADDITIONS ===
+# === FINVIZ / FINTEL NEWS & SHORT DATA ADDITIONS ===
 import requests
 from bs4 import BeautifulSoup
 import pytz
@@ -112,6 +112,46 @@ def get_finviz_news_today():
                 }
             )
     return items
+
+
+def get_fintel_short_data(ticker: str):
+    """
+    Scrape Fintel for simple short-availability snapshot for the ticker.
+    NOTE: This is best-effort HTML scraping and may need adjustment if Fintel changes layout.
+    """
+    url = f"https://fintel.io/s/us/{ticker.lower()}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Best-effort: look for the first table that looks like short availability
+    # Usually, rows look like: Time | Shares Available | Borrow Fee | ...
+    short_info = {"time": None, "shares": None, "fee": None}
+
+    # Grab first table with at least a few rows/columns and treat first data row as latest
+    tables = soup.find_all("table")
+    for table in tables:
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+        # Skip header row, inspect first data row
+        for row in rows[1:3]:  # only first couple rows
+            cells = row.find_all("td")
+            if len(cells) < 3:
+                continue
+            time_txt = cells[0].get_text(strip=True)
+            shares_txt = cells[1].get_text(strip=True)
+            fee_txt = cells[2].get_text(strip=True)
+
+            # Basic sanity checks: shares numeric-ish, fee contains % or number
+            if not shares_txt:
+                continue
+            short_info["time"] = time_txt
+            short_info["shares"] = shares_txt
+            short_info["fee"] = fee_txt
+            return short_info
+
+    return None
 
 
 # ========================= SETTINGS =========================
@@ -1330,7 +1370,7 @@ else:
             c2.write(f"Breakout Confirm: {row.get('Breakout_Confirm', 0)} / 100")
             c2.write(f"Entry Confidence: {row.get('Entry_Confidence', 0)} / 100")
 
-            # Column 3: Microstructure + AI commentary
+            # Column 3: Microstructure + AI commentary + SHORT AVAILABILITY
             c3.write(f"VWAP Dist %: {row['VWAP%']}")
             c3.write(f"Order Flow Bias: {row['FlowBias']}")
             if enable_enrichment:
@@ -1339,6 +1379,23 @@ else:
                 c3.write(f"News Sentiment: {row.get('Sentiment', 0)}")
             else:
                 c3.write("Enrichment: OFF (float/short/news skipped for speed)")
+
+            # Fintel short availability (display only)
+            try:
+                short_data = get_fintel_short_data(sym)
+            except Exception:
+                short_data = None
+
+            if short_data and (short_data.get("shares") or short_data.get("fee")):
+                shares_txt = short_data.get("shares") or "—"
+                fee_txt = short_data.get("fee") or "—"
+                time_txt = short_data.get("time")
+                c3.write(f"Shortable (Fintel): {shares_txt}")
+                c3.write(f"Borrow Fee (Fintel): {fee_txt}")
+                if time_txt:
+                    c3.write(f"Short Data Time: {time_txt}")
+            else:
+                c3.write("Shortable (Fintel): n/a")
 
             # AI commentary line
             c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
@@ -1447,6 +1504,7 @@ else:
         # =========================================
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
