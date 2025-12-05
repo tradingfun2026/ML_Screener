@@ -9,16 +9,92 @@ import math
 import random
 import re
 
-# ========================= SETTINGS =========================
-THREADS               = 20           # keep high but not crazy
-AUTO_REFRESH_DEFAULT  = 120_000      # default auto-refresh every 120 seconds
-HISTORY_LOOKBACK_DAYS = 10           # 🔥 10-day mode
-INTRADAY_INTERVAL     = "2m"         # 2-minute candles
-INTRADAY_RANGE        = "1d"
+# === FINVIZ NEWS ADDITIONS ===
+import requests
+from bs4 import BeautifulSoup
+import pytz
 
-DEFAULT_MAX_PRICE     = 5.0
-DEFAULT_MIN_VOLUME    = 100_000
-DEFAULT_MIN_BREAKOUT  = 0.0
+
+def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
+    """Scrape Finviz for headlines related only to the given ticker."""
+    url = f"https://finviz.com/quote.ashx?t={ticker}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    items = []
+    rows = soup.select("table.fullview-news-outer table tr")
+
+    for row in rows[:max_items]:
+        tds = row.find_all("td")
+        if len(tds) < 2:
+            continue
+        time_text = tds[0].get_text(strip=True)
+        link = tds[1].find("a")
+        if not link:
+            continue
+
+        title = link.get_text(strip=True)
+        url = "https://finviz.com/" + link["href"].lstrip("/")
+
+        # Simple sentiment via keywords
+        lower = title.lower()
+        if any(w in lower for w in ["up", "surge", "record", "beat", "beats", "growth", "upgrade", "upgrades", "bull"]):
+            sentiment = "🟢"
+        elif any(w in lower for w in ["down", "fall", "falls", "miss", "misses", "plunge", "warning", "cut", "cuts", "downgrade", "downgrades", "bear"]):
+            sentiment = "🔴"
+        else:
+            sentiment = "⚪"
+
+        items.append(
+            {
+                "time": time_text,
+                "title": title,
+                "sent": sentiment,
+                "url": url,
+            }
+        )
+    return items
+
+
+def get_finviz_news_today():
+    """Pull general market headlines for today only, as on Finviz news page."""
+    url = "https://finviz.com/news.ashx"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(url, headers=headers)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    today = datetime.now(pytz.timezone("US/Eastern")).strftime("%m-%d-%Y")
+    items = []
+
+    for row in soup.select("table.news-table tr"):
+        date_td = row.select_one("td:nth-child(1)")
+        link_td = row.select_one("td:nth-child(2) a")
+        if not date_td or not link_td:
+            continue
+
+        date_text = date_td.get_text(strip=True)
+        if today in date_text:
+            items.append(
+                {
+                    "time": date_text,
+                    "title": link_td.get_text(strip=True),
+                    "url": "https://finviz.com/" + link_td["href"].lstrip("/"),
+                }
+            )
+    return items
+
+
+# ========================= SETTINGS =========================
+THREADS = 20  # keep high but not crazy
+AUTO_REFRESH_DEFAULT = 120_000  # default auto-refresh every 120 seconds
+HISTORY_LOOKBACK_DAYS = 10  # 🔥 10-day mode
+INTRADAY_INTERVAL = "2m"  # 2-minute candles
+INTRADAY_RANGE = "1d"
+
+DEFAULT_MAX_PRICE = 5.0
+DEFAULT_MIN_VOLUME = 100_000
+DEFAULT_MIN_BREAKOUT = 0.0
 
 # ========================= SESSION STATE FOR V11/V12 STREAMING =========================
 if "auto_refresh_enabled" not in st.session_state:
@@ -146,7 +222,7 @@ with st.sidebar:
     enable_ofb_filter = st.checkbox(
         "Use Min Order Flow Bias Filter",
         value=False,
-        help="When enabled, only keep symbols where buy volume dominates."
+        help="When enabled, only keep symbols where buy volume dominates.",
     )
     min_ofb = st.slider(
         "Min Order Flow Bias (0–1, buyer control)",
@@ -154,14 +230,14 @@ with st.sidebar:
         max_value=1.00,
         value=0.50,
         step=0.01,
-        help="0.5 = equal buy/sell; 0.7 = strong buyer control."
+        help="0.5 = equal buy/sell; 0.7 = strong buyer control.",
     )
 
     # V11: Ignore filters when watchlist populated (watchlist precedence)
     ignore_filters_for_watchlist = st.checkbox(
         "Ignore filters when watchlist is populated (V11)",
         value=False,
-        help="When enabled and watchlist has symbols, hard filters (price, volume, etc.) are skipped."
+        help="When enabled and watchlist has symbols, hard filters (price, volume, etc.) are skipped.",
     )
 
     st.markdown("---")
@@ -171,7 +247,7 @@ with st.sidebar:
     enable_alerts = st.checkbox(
         "Enable Audio + Alert Banner",
         value=False,
-        help="Turn this off to completely silence alerts."
+        help="Turn this off to completely silence alerts.",
     )
 
     ALERT_SCORE_THRESHOLD = st.slider("Alert when Score ≥", 10, 200, 30, 5)
@@ -184,7 +260,7 @@ with st.sidebar:
     auto_refresh_enabled = st.checkbox(
         "Enable Auto-Refresh (Streaming)",
         value=st.session_state.auto_refresh_enabled,
-        help="Controls whether the app auto-refreshes. Takes effect on next refresh."
+        help="Controls whether the app auto-refreshes. Takes effect on next refresh.",
     )
     auto_refresh_ms = st.slider(
         "Auto-Refresh Interval (ms)",
@@ -192,7 +268,7 @@ with st.sidebar:
         max_value=300_000,
         value=st.session_state.auto_refresh_ms,
         step=5_000,
-        help="Used when auto-refresh is enabled."
+        help="Used when auto-refresh is enabled.",
     )
     st.session_state.auto_refresh_enabled = auto_refresh_enabled
     st.session_state.auto_refresh_ms = auto_refresh_ms
@@ -201,14 +277,14 @@ with st.sidebar:
     preopen_mode = st.checkbox(
         "Pre-Open Scan Mode (V11)",
         value=False,
-        help="Emphasize premarket moves & volume; de-emphasize longer-term trend."
+        help="Emphasize premarket moves & volume; de-emphasize longer-term trend.",
     )
 
     # V11: universe caching persistence
     use_last_results = st.checkbox(
         "Use last scan results (no rescan, V11)",
         value=False,
-        help="Use cached universe from prior run instead of rescanning."
+        help="Use cached universe from prior run instead of rescanning.",
     )
 
     # 🔘 V12: Force New Seed BUTTON (not a checkbox)
@@ -216,7 +292,7 @@ with st.sidebar:
     st.subheader("V12 Seeding")
     force_new_seed = st.button(
         "Force New Seed (V12)",
-        help="Clear cached scans and reseed the universe on the next run."
+        help="Clear cached scans and reseed the universe on the next run.",
     )
     if force_new_seed:
         st.cache_data.clear()
@@ -354,7 +430,7 @@ def build_universe(
             ranked_sorted = sorted(
                 ranked,
                 key=lambda x: x.get("LiveVol", 0.0),
-                reverse=True
+                reverse=True,
             )
             universe = ranked_sorted[:max_universe]
     else:
@@ -404,8 +480,8 @@ def short_window_score(
     score = 0.0
 
     # Pre-open mode tweaks weights a bit toward PM & RVOL
-    pm_w   = 2.0 if preopen_mode else 1.6
-    m10_w  = 0.3 if preopen_mode else 0.6
+    pm_w = 2.0 if preopen_mode else 1.6
+    m10_w = 0.3 if preopen_mode else 0.6
     rvol_w = 2.6 if preopen_mode else 2.0
 
     if pm is not None:
@@ -486,13 +562,38 @@ def news_sentiment_score(title: str, summary: str | None = None) -> float:
     text = text.lower()
 
     pos_words = [
-        "beat", "beats", "strong", "surge", "upgrade", "upgrades", "bullish",
-        "raises", "raise", "record", "jump", "rally", "soars", "soar", "momentum"
+        "beat",
+        "beats",
+        "strong",
+        "surge",
+        "upgrade",
+        "upgrades",
+        "bullish",
+        "raises",
+        "raise",
+        "record",
+        "jump",
+        "rally",
+        "soars",
+        "soar",
+        "momentum",
     ]
     neg_words = [
-        "miss", "misses", "weak", "downgrade", "downgrades", "bearish",
-        "cuts", "cut", "plunge", "fall", "falls", "tumbles", "tumble",
-        "guidance cut", "warning"
+        "miss",
+        "misses",
+        "weak",
+        "downgrade",
+        "downgrades",
+        "bearish",
+        "cuts",
+        "cut",
+        "plunge",
+        "fall",
+        "falls",
+        "tumbles",
+        "tumble",
+        "guidance cut",
+        "warning",
     ]
 
     score = 0
@@ -844,7 +945,7 @@ def scan_one(
             "Symbol": ticker,
             "Exchange": exchange,
             "Price": round(price, 2),
-            "Volume": int(live_intraday_volume),     # 🔥 live intraday volume
+            "Volume": int(live_intraday_volume),  # 🔥 live intraday volume
             "Score": score,
             "Prob_Rise%": prob_rise,
             "PM%": round(premarket_pct, 2) if premarket_pct is not None else None,
@@ -943,12 +1044,14 @@ def run_scan(
 # ========================= SPARKLINE & CHART HELPERS =========================
 def sparkline(series: pd.Series):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        y=series.values,
-        mode="lines",
-        line=dict(width=2),
-        hoverinfo="skip",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            y=series.values,
+            mode="lines",
+            line=dict(width=2),
+            hoverinfo="skip",
+        )
+    )
     fig.update_layout(
         height=60,
         width=160,
@@ -961,11 +1064,13 @@ def sparkline(series: pd.Series):
 
 def bigline(series: pd.Series, title: str):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        y=series.values,
-        mode="lines+markers",
-        name=title,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            y=series.values,
+            mode="lines+markers",
+            name=title,
+        )
+    )
     fig.update_layout(
         height=220,
         margin=dict(l=40, r=20, t=40, b=40),
@@ -1087,7 +1192,7 @@ else:
                 entry_val = entry_val or 0.0
 
             ai_target = round(price_val * (1 + (bci_val / 250.0) + (entry_val / 400.0)), 2)
-            ai_stop   = round(price_val * (1 - (1 - entry_val / 100.0) * 0.05), 2)
+            ai_stop = round(price_val * (1 - (1 - entry_val / 100.0) * 0.05), 2)
 
             c1.write(f"🎯 AI Target: **${ai_target}**")
             c1.write(f"🛑 AI Stop: **${ai_stop}**")
@@ -1158,9 +1263,7 @@ else:
             c3.write(f"VWAP Dist %: {row['VWAP%']}")
             c3.write(f"Order Flow Bias: {row['FlowBias']}")
             if enable_enrichment:
-                c3.write(
-                    f"Squeeze: {row['Squeeze?']} | LowFloat: {row['LowFloat?']}"
-                )
+                c3.write(f"Squeeze: {row['Squeeze?']} | LowFloat: {row['LowFloat?']}")
                 c3.write(f"Sec/Ind: {row['Sector']} / {row['Industry']}")
                 c3.write(f"News Sentiment: {row.get('Sentiment', 0)}")
             else:
@@ -1168,6 +1271,24 @@ else:
 
             # AI commentary line
             c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
+
+            # === TICKER-SPECIFIC FINVIZ NEWS PER CARD ===
+            with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
+                try:
+                    news_items = get_finviz_news_for_ticker(sym)
+                    if not news_items:
+                        c3.write("No recent Finviz headlines found for this ticker.")
+                    else:
+                        for n in news_items:
+                            c3.markdown(
+                                f"{n['sent']} "
+                                f"[{n['title']}]({n['url']})  \n"
+                                f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
+                                unsafe_allow_html=True,
+                            )
+                except Exception:
+                    c3.write("⚠ Unable to fetch Finviz news for this ticker.")
+            # =============================================
 
             # Column 4: Sparkline + full chart
             c4.plotly_chart(sparkline(row["Spark"]), use_container_width=False)
@@ -1207,11 +1328,32 @@ else:
 
         # Download current table
         csv_cols = [
-            "Symbol", "Exchange", "Price", "Volume", "Score", "Prob_Rise%",
-            "PM%", "YDay%", "3D%", "10D%", "RSI7", "EMA10 Trend",
-            "RVOL_10D", "VWAP%", "FlowBias", "Squeeze?", "LowFloat?",
-            "Short % Float", "Sector", "Industry", "Catalyst", "MTF_Trend",
-            "AI_Commentary", "Sentiment", "Entry_Confidence", "Breakout_Confirm",
+            "Symbol",
+            "Exchange",
+            "Price",
+            "Volume",
+            "Score",
+            "Prob_Rise%",
+            "PM%",
+            "YDay%",
+            "3D%",
+            "10D%",
+            "RSI7",
+            "EMA10 Trend",
+            "RVOL_10D",
+            "VWAP%",
+            "FlowBias",
+            "Squeeze?",
+            "LowFloat?",
+            "Short % Float",
+            "Sector",
+            "Industry",
+            "Catalyst",
+            "MTF_Trend",
+            "AI_Commentary",
+            "Sentiment",
+            "Entry_Confidence",
+            "Breakout_Confirm",
         ]
         csv_cols = [c for c in csv_cols if c in df.columns]
 
@@ -1222,7 +1364,23 @@ else:
             mime="text/csv",
         )
 
+        # === GLOBAL FINVIZ NEWS (TODAY) AT BOTTOM ===
+        with st.expander("📰 Today's Market Headlines (Finviz)"):
+            try:
+                finviz_news = get_finviz_news_today()
+                if not finviz_news:
+                    st.write("No Finviz headlines found for today yet.")
+                else:
+                    for n in finviz_news:
+                        st.markdown(
+                            f"**{n['time']}** — [{n['title']}]({n['url']})"
+                        )
+            except Exception:
+                st.write("⚠ Could not fetch Finviz daily headlines.")
+        # =========================================
+
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
