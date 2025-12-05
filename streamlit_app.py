@@ -19,7 +19,7 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
     """Scrape Finviz for headlines related only to the given ticker."""
     url = f"https://finviz.com/quote.ashx?t={ticker}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=10)
     soup = BeautifulSoup(resp.text, "html.parser")
 
     items = []
@@ -77,7 +77,7 @@ def get_finviz_news_today():
     """Pull general market headlines for today only, as on Finviz news page."""
     url = "https://finviz.com/news.ashx"
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers)
+    resp = requests.get(url, headers=headers, timeout=10)
     soup = BeautifulSoup(resp.text, "html.parser")
 
     today = datetime.now(pytz.timezone("US/Eastern")).strftime("%m-%d-%Y")
@@ -230,11 +230,11 @@ with st.sidebar:
     squeeze_only = st.checkbox("Short-Squeeze Only")
     catalyst_only = st.checkbox("Must Have News/Earnings")
 
-    # NEW: Finviz catalyst-only filter
+    # NEW: Finviz catalyst-only visual filter (does NOT hide rows; just marks)
     catalyst_finviz_only = st.checkbox(
         "Finviz News Catalyst Required",
         value=False,
-        help="Only show tickers that currently have Finviz headlines available.",
+        help="Highlight Finviz catalyst tickers; non-catalysts are still shown but marked.",
     )
 
     # VWAP gating: this checkbox now also controls whether VWAP contributes to the score
@@ -1168,7 +1168,22 @@ else:
     if df.empty:
         st.error("No results left after filters. Try relaxing constraints or disabling 'Ignore filters' toggle.")
     else:
-        df = df.sort_values(by=["Score", "PM%", "RSI7"], ascending=[False, False, False])
+        # === Precompute Finviz news for all df symbols & build boolean column ===
+        finviz_cache = {}
+        for sym in df["Symbol"].unique():
+            try:
+                items = get_finviz_news_for_ticker(sym)
+            except Exception:
+                items = []
+            finviz_cache[sym] = items
+
+        df["FinvizNews"] = df["Symbol"].map(lambda s: bool(finviz_cache.get(s)))
+
+        # Sort by Score, then FinvizNews (True first), then PM%, then RSI7
+        df = df.sort_values(
+            by=["Score", "FinvizNews", "PM%", "RSI7"],
+            ascending=[False, False, False, False],
+        )
 
         st.subheader(f"🔥 10-Day Momentum Board (V12) — {len(df)} symbols")
 
@@ -1180,16 +1195,8 @@ else:
         # Iterate + audio alerts + inline charts
         for _, row in df.iterrows():
             sym = row["Symbol"]
-
-            # === FINVIZ NEWS: fetch once per ticker, seed & filter ===
-            finviz_items = []
-            has_finviz = False
-            try:
-                finviz_items = get_finviz_news_for_ticker(sym)
-                has_finviz = bool(finviz_items)
-            except Exception:
-                finviz_items = []
-                has_finviz = False
+            finviz_items = finviz_cache.get(sym, [])
+            has_finviz = bool(finviz_items)
 
             # Session-only: auto-add Finviz-news tickers to seed
             if has_finviz:
@@ -1197,11 +1204,6 @@ else:
                 if sym not in existing_syms:
                     st.session_state.seed_universe.append({"Symbol": sym, "Exchange": row["Exchange"]})
                     st.session_state.seed_universe_size = len(st.session_state.seed_universe)
-
-            # Finviz catalyst filter: skip row if required but no Finviz news
-            if catalyst_finviz_only and not has_finviz:
-                continue
-            # ==========================================================
 
             # Audio alerts (once per symbol, if enabled)
             if enable_alerts and sym not in st.session_state.alerted:
@@ -1216,6 +1218,16 @@ else:
 
             # Column 1: Basic info + score + volume
             c1.markdown(f"**{sym}** ({row['Exchange']})")
+
+            # C1 badge placement: directly under symbol
+            if has_finviz:
+                c1.markdown("🔥 **Catalyst (Finviz)**")
+            else:
+                if catalyst_finviz_only:
+                    c1.markdown("⚪ No Finviz Catalyst *(does not meet Finviz filter)*")
+                else:
+                    c1.markdown("⚪ No Finviz Catalyst")
+
             c1.write(f"💲 Price: {row['Price']}")
             c1.write(f"📊 Live Volume: {row['Volume']:,}")
             c1.write(f"🔥 Score: **{row['Score']}**")
@@ -1321,10 +1333,10 @@ else:
             # === TICKER-SPECIFIC FINVIZ NEWS PER CARD ===
             with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
                 if not finviz_items:
-                    c3.write("No recent Finviz headlines found for this ticker.")
+                    st.write("No recent Finviz headlines found for this ticker.")
                 else:
                     for n in finviz_items:
-                        c3.markdown(
+                        st.markdown(
                             f"{n['sent']} "
                             f"[{n['title']}]({n['url']})  \n"
                             f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
@@ -1422,6 +1434,7 @@ else:
         # =========================================
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
