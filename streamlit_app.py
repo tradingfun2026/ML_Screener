@@ -41,7 +41,23 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
         lower = title.lower()
         if any(w in lower for w in ["up", "surge", "record", "beat", "beats", "growth", "upgrade", "upgrades", "bull"]):
             sentiment = "🟢"
-        elif any(w in lower for w in ["down", "fall", "falls", "miss", "misses", "plunge", "warning", "cut", "cuts", "downgrade", "downgrades", "bear"]):
+        elif any(
+            w in lower
+            for w in [
+                "down",
+                "fall",
+                "falls",
+                "miss",
+                "misses",
+                "plunge",
+                "warning",
+                "cut",
+                "cuts",
+                "downgrade",
+                "downgrades",
+                "bear",
+            ]
+        ):
             sentiment = "🔴"
         else:
             sentiment = "⚪"
@@ -214,6 +230,13 @@ with st.sidebar:
     squeeze_only = st.checkbox("Short-Squeeze Only")
     catalyst_only = st.checkbox("Must Have News/Earnings")
 
+    # NEW: Finviz catalyst-only filter
+    catalyst_finviz_only = st.checkbox(
+        "Finviz News Catalyst Required",
+        value=False,
+        help="Only show tickers that currently have Finviz headlines available.",
+    )
+
     # VWAP gating: this checkbox now also controls whether VWAP contributes to the score
     vwap_only = st.checkbox("Above VWAP Only (VWAP% > 0)")
 
@@ -320,6 +343,7 @@ with st.sidebar:
         if "last_df" in st.session_state:
             del st.session_state["last_df"]
         st.success("Cache cleared — fresh scan will run now.")
+
 
 # ========================= SYMBOL LOAD =========================
 @st.cache_data(ttl=900)
@@ -1157,6 +1181,28 @@ else:
         for _, row in df.iterrows():
             sym = row["Symbol"]
 
+            # === FINVIZ NEWS: fetch once per ticker, seed & filter ===
+            finviz_items = []
+            has_finviz = False
+            try:
+                finviz_items = get_finviz_news_for_ticker(sym)
+                has_finviz = bool(finviz_items)
+            except Exception:
+                finviz_items = []
+                has_finviz = False
+
+            # Session-only: auto-add Finviz-news tickers to seed
+            if has_finviz:
+                existing_syms = {s["Symbol"] for s in st.session_state.seed_universe}
+                if sym not in existing_syms:
+                    st.session_state.seed_universe.append({"Symbol": sym, "Exchange": row["Exchange"]})
+                    st.session_state.seed_universe_size = len(st.session_state.seed_universe)
+
+            # Finviz catalyst filter: skip row if required but no Finviz news
+            if catalyst_finviz_only and not has_finviz:
+                continue
+            # ==========================================================
+
             # Audio alerts (once per symbol, if enabled)
             if enable_alerts and sym not in st.session_state.alerted:
                 if row["Score"] is not None and row["Score"] >= ALERT_SCORE_THRESHOLD:
@@ -1274,20 +1320,16 @@ else:
 
             # === TICKER-SPECIFIC FINVIZ NEWS PER CARD ===
             with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
-                try:
-                    news_items = get_finviz_news_for_ticker(sym)
-                    if not news_items:
-                        c3.write("No recent Finviz headlines found for this ticker.")
-                    else:
-                        for n in news_items:
-                            c3.markdown(
-                                f"{n['sent']} "
-                                f"[{n['title']}]({n['url']})  \n"
-                                f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
-                                unsafe_allow_html=True,
-                            )
-                except Exception:
-                    c3.write("⚠ Unable to fetch Finviz news for this ticker.")
+                if not finviz_items:
+                    c3.write("No recent Finviz headlines found for this ticker.")
+                else:
+                    for n in finviz_items:
+                        c3.markdown(
+                            f"{n['sent']} "
+                            f"[{n['title']}]({n['url']})  \n"
+                            f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
+                            unsafe_allow_html=True,
+                        )
             # =============================================
 
             # Column 4: Sparkline + full chart
@@ -1380,6 +1422,7 @@ else:
         # =========================================
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
