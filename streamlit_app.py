@@ -9,19 +9,28 @@ import math
 import random
 import re
 
-# === FINVIZ / FINTEL NEWS & SHORT DATA ADDITIONS ===
+# === NEW: external data helpers ===
 import requests
 from bs4 import BeautifulSoup
 import pytz
 
 
-def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
-    """Scrape Finviz for headlines related only to the given ticker."""
+# ========================= FINVIZ / FINTEL HELPERS =========================
+def get_finviz_news_for_ticker(ticker: str, max_items: int = 6):
+    """
+    Scrape Finviz for headlines related only to the given ticker.
+    Returns a list of dicts: {time, title, sent, url}
+    """
     url = f"https://finviz.com/quote.ashx?t={ticker}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers, timeout=10)
-    soup = BeautifulSoup(resp.text, "html.parser")
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except Exception:
+        return []
+    if resp.status_code != 200:
+        return []
 
+    soup = BeautifulSoup(resp.text, "html.parser")
     items = []
     rows = soup.select("table.fullview-news-outer table tr")
 
@@ -35,7 +44,7 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
             continue
 
         title = link.get_text(strip=True)
-        url = "https://finviz.com/" + link["href"].lstrip("/")
+        news_url = "https://finviz.com/" + link["href"].lstrip("/")
 
         # Simple sentiment via keywords
         lower = title.lower()
@@ -51,6 +60,8 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
                 "upgrade",
                 "upgrades",
                 "bull",
+                "bulish",
+                "bullish",
             ]
         ):
             sentiment = "🟢"
@@ -69,6 +80,7 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
                 "downgrade",
                 "downgrades",
                 "bear",
+                "bearish",
             ]
         ):
             sentiment = "🔴"
@@ -80,17 +92,25 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 3):
                 "time": time_text,
                 "title": title,
                 "sent": sentiment,
-                "url": url,
+                "url": news_url,
             }
         )
     return items
 
 
 def get_finviz_news_today():
-    """Pull general market headlines for today only, as on Finviz news page."""
+    """
+    Pull general market headlines for today only, as on Finviz news page.
+    """
     url = "https://finviz.com/news.ashx"
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers, timeout=10)
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except Exception:
+        return []
+    if resp.status_code != 200:
+        return []
+
     soup = BeautifulSoup(resp.text, "html.parser")
 
     today = datetime.now(pytz.timezone("US/Eastern")).strftime("%m-%d-%Y")
@@ -116,14 +136,19 @@ def get_finviz_news_today():
 
 def get_fintel_short_data(ticker: str):
     """
-    Scrape Fintel for simple short-availability snapshot for the ticker.
-    NOTE: This is best-effort HTML scraping and may need adjustment if Fintel changes layout.
+    Scrape Fintel for a simple short-availability snapshot for the ticker.
+    Returns dict {time, shares, fee} or None.
     """
     url = f"https://fintel.io/s/us/{ticker.lower()}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, headers=headers, timeout=10)
-    soup = BeautifulSoup(resp.text, "html.parser")
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
 
+    soup = BeautifulSoup(resp.text, "html.parser")
     short_info = {"time": None, "shares": None, "fee": None}
 
     tables = soup.find_all("table")
@@ -131,7 +156,7 @@ def get_fintel_short_data(ticker: str):
         rows = table.find_all("tr")
         if len(rows) < 2:
             continue
-        for row in rows[1:3]:  # only first couple of data rows
+        for row in rows[1:3]:  # look at first couple of rows
             cells = row.find_all("td")
             if len(cells) < 3:
                 continue
@@ -168,6 +193,7 @@ if "auto_refresh_ms" not in st.session_state:
 
 # champion / seed universe state
 if "seed_universe" not in st.session_state:
+    # entries now look like: {"Symbol": "XYZ", "Exchange": "NASDAQ", "LastNewsSeed": "... UTC"}
     st.session_state.seed_universe = []
 if "seed_universe_created_at" not in st.session_state:
     st.session_state.seed_universe_created_at = None
@@ -277,7 +303,10 @@ with st.sidebar:
     catalyst_finviz_only = st.checkbox(
         "Finviz News Catalyst Required",
         value=False,
-        help="When enabled, only show tickers that currently have headlines on Finviz for their symbol.",
+        help=(
+            "When enabled, only show tickers that currently have headlines on Finviz "
+            "for their symbol. (Seeding still happens for any news, even if this is off.)"
+        ),
     )
 
     vwap_only = st.checkbox("Above VWAP Only (VWAP% > 0)")
@@ -383,6 +412,10 @@ with st.sidebar:
 # ========================= SYMBOL LOAD =========================
 @st.cache_data(ttl=900)
 def load_symbols():
+    """
+    Load US symbols (NASDAQ + otherlisted) in a robust way.
+    Handles schema changes on nasdaqtrader with defensive column access.
+    """
     nasdaq = pd.read_csv(
         "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
         sep="|",
@@ -406,14 +439,24 @@ def load_symbols():
     nasdaq_symbols = nasdaq[nasdaq_symbol_col].astype(str).str.strip()
     other_symbols = other[other_symbol_col].astype(str).str.strip()
 
-    nasdaq_df = pd.DataFrame({"Symbol": nasdaq_symbols, "Exchange": "NASDAQ"})
+    nasdaq_df = pd.DataFrame(
+        {
+            "Symbol": nasdaq_symbols,
+            "Exchange": "NASDAQ",
+        }
+    )
 
     if "Exchange" in other.columns:
         other_exchange = other["Exchange"].fillna("NYSE/AMEX/ARCA").astype(str)
     else:
         other_exchange = pd.Series(["NYSE/AMEX/ARCA"] * len(other_symbols))
 
-    other_df = pd.DataFrame({"Symbol": other_symbols, "Exchange": other_exchange})
+    other_df = pd.DataFrame(
+        {
+            "Symbol": other_symbols,
+            "Exchange": other_exchange,
+        }
+    )
 
     df = pd.concat([nasdaq_df, other_df], ignore_index=True).dropna(subset=["Symbol"])
     df = df[df["Symbol"].str.match(r"^[A-Z]{1,5}$", na=False)]
@@ -426,17 +469,28 @@ def build_universe(
     universe_mode: str,
     volume_rank_pool: int,
 ):
+    """
+    Return a list of symbol dicts to scan, based on:
+    - Watchlist
+    - Cached champion seed universe (V12)
+    - Classic alphabetical slice
+    - Randomized slice
+    - Live volume-ranked (V9)
+    """
     wl = watchlist_text.strip()
     if wl:
         raw = wl.replace("\n", " ").replace(",", " ").split()
         tickers = sorted(set(s.upper() for s in raw if s.strip()))
         return [{"Symbol": t, "Exchange": "WATCH"} for t in tickers]
 
+    # ✅ V12: if we already have a seeded / champion universe, reuse it
     if st.session_state.seed_universe:
+        # Only Symbol and Exchange are used; LastNewsSeed is ignored here
         return st.session_state.seed_universe[:max_universe]
 
     syms = load_symbols()
 
+    # V9 modes (only used the first time, to create the seed_universe)
     if universe_mode == "Randomized Slice":
         base = syms[:]
         random.shuffle(base)
@@ -450,19 +504,27 @@ def build_universe(
                 t = yf.Ticker(sym["Symbol"])
                 d = t.history(period="1d", interval=INTRADAY_INTERVAL, prepost=True)
                 if not d.empty:
+                    # Live volume = cumulative intraday volume
                     live_vol = float(d["Volume"].sum())
                     ranked.append({**sym, "LiveVol": live_vol})
             except Exception:
                 continue
 
         if not ranked:
+            # fallback to classic if volume fetch fails
             universe = syms[:max_universe]
         else:
-            ranked_sorted = sorted(ranked, key=lambda x: x.get("LiveVol", 0.0), reverse=True)
+            ranked_sorted = sorted(
+                ranked,
+                key=lambda x: x.get("LiveVol", 0.0),
+                reverse=True,
+            )
             universe = ranked_sorted[:max_universe]
     else:
+        # Classic
         universe = syms[:max_universe]
 
+    # Store champion / seed universe in session so it persists across refreshes
     st.session_state.seed_universe = universe
     st.session_state.seed_universe_size = len(universe)
     st.session_state.seed_universe_mode = universe_mode
@@ -488,8 +550,12 @@ def short_window_score(
     preopen_mode=False,
     vwap_enabled=True,
 ):
+    """
+    Short-window breakout score.
+    """
     score = 0.0
 
+    # Pre-open mode tweaks weights a bit toward PM & RVOL
     pm_w = 2.0 if preopen_mode else 1.6
     m10_w = 0.3 if preopen_mode else 0.6
     rvol_w = 2.6 if preopen_mode else 2.0
@@ -509,6 +575,7 @@ def short_window_score(
     if rvol10 is not None and rvol10 > 1.2:
         score += (rvol10 - 1.2) * rvol_w
 
+    # 👉 VWAP bonus only applied when vwap_enabled
     if vwap_enabled and vwap is not None and vwap > 0:
         score += min(vwap, 6) * 1.5
 
@@ -524,6 +591,10 @@ def short_window_score(
 
 
 def ml_breakout_probability(score: float, rvol10, pm, m10) -> float:
+    """
+    'ML-style' probability-like number, using a richer feature mix
+    but kept lightweight (no external libraries).
+    """
     try:
         base = score / 25.0
         if rvol10 is not None:
@@ -540,6 +611,7 @@ def ml_breakout_probability(score: float, rvol10, pm, m10) -> float:
 
 
 def multi_timeframe_label(pm, m3, m10):
+    """Simple multi-timeframe alignment label: intraday + 3D + 10D."""
     bull_intraday = pm is not None and pm > 0
     bull_3d = m3 is not None and m3 > 0
     bull_10d = m10 is not None and m10 > 0
@@ -557,6 +629,10 @@ def multi_timeframe_label(pm, m3, m10):
 
 
 def news_sentiment_score(title: str, summary: str | None = None) -> float:
+    """
+    Very lightweight sentiment scorer using keywords.
+    Returns value in roughly [-1, 1].
+    """
     text = (title or "") + " " + (summary or "")
     text = text.lower()
 
@@ -609,28 +685,37 @@ def news_sentiment_score(title: str, summary: str | None = None) -> float:
 
 
 def entry_confidence_score(vwap_dist, rvol10, flow_bias) -> float:
+    """
+    Entry timing confidence 0–100 based on VWAP distance, RVOL, and OFB.
+    """
     if vwap_dist is None or rvol10 is None or flow_bias is None:
-        return 50.0
+        return 50.0  # neutral
 
     score = 60.0
 
+    # ideal VWAP zone: 0 to +3%
     if -1 <= vwap_dist <= 3:
         score += 15
     elif abs(vwap_dist) > 8:
         score -= 15
 
+    # RVOL contribution
     if rvol10 > 2:
         score += 10
     elif rvol10 < 0.7:
         score -= 10
 
+    # order flow bias
     score += (flow_bias - 0.5) * 40.0
 
     return round(max(0.0, min(100.0, score)), 1)
 
 
 def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
-    base = (score or 0) / 2.0
+    """
+    Breakout confirmation index 0–100 combining score, RVOL, PM, and 10D trend.
+    """
+    base = (score or 0) / 2.0  # 0–100 if score ~ 0–200
     if rvol10 is not None:
         base += max(0.0, (rvol10 - 1.0) * 8.0)
     if pm is not None:
@@ -641,9 +726,11 @@ def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
     return round(max(0.0, min(100.0, base)), 1)
 
 
+# ========================= SIMPLE AI COMMENTARY =========================
 def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_conf, bci, preopen_mode):
     comments = []
 
+    # High level regime
     if score is not None:
         if score >= 90:
             comments.append("Explosive momentum profile, risk-on candidate.")
@@ -652,24 +739,28 @@ def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_co
         elif score >= 30:
             comments.append("Early momentum, still needs confirmation.")
 
+    # Premarket behavior
     if pm is not None:
         if pm > 5:
             comments.append("Strong premarket demand showing early accumulation.")
         elif pm < -3:
             comments.append("Notable premarket supply; caution on chasing intraday pops.")
 
+    # Volume / liquidity
     if rvol is not None:
         if rvol > 2:
             comments.append("Volume aggressively expanding vs 10-day baseline.")
         elif rvol < 0.7:
             comments.append("Liquidity muted; slippage/whipsaws more likely.")
 
+    # Order flow
     if flow_bias is not None:
         if flow_bias > 0.7:
             comments.append("Buyers dominating tape, dips may get absorbed quickly.")
         elif flow_bias < 0.4:
             comments.append("Sellers pressing, rallies could be sold into.")
 
+    # VWAP / positioning
     if vwap is not None:
         if 0 <= vwap <= 3:
             comments.append("Trading near/just above VWAP – healthy risk/reward zone.")
@@ -678,21 +769,25 @@ def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_co
         elif vwap < 0:
             comments.append("Below VWAP – still under distribution pressure.")
 
+    # 10-day structure
     if ten_day is not None:
         if ten_day > 15:
             comments.append("10D structure confirmed uptrend; pullbacks may be buyable.")
         elif ten_day < -8:
             comments.append("10D trend in clear distribution – countertrend risk.")
 
+    # News sentiment
     if sentiment is not None:
         if sentiment > 0.4:
             comments.append("Headline flow skewed positive; narrative supportive.")
         elif sentiment < -0.4:
             comments.append("Recent headlines skewed negative; narrative drag present.")
 
+    # Pre-open mode note
     if preopen_mode:
         comments.append("Pre-open mode: signal weights biased toward PM and early volume.")
 
+    # Entry confidence & BCI
     comments.append(f"Entry confidence ~ {entry_conf:.0f}/100.")
     comments.append(f"Breakout confirmation ~ {bci:.0f}/100.")
 
@@ -716,6 +811,7 @@ def scan_one(
         exchange = sym.get("Exchange", "UNKNOWN")
         stock = yf.Ticker(ticker)
 
+        # Daily 10d history
         hist = stock.history(period=f"{HISTORY_LOOKBACK_DAYS}d", interval="1d")
         if hist is None or hist.empty or len(hist) < 5:
             return None
@@ -723,9 +819,11 @@ def scan_one(
         close = hist["Close"]
         daily_volume = hist["Volume"]
 
+        # Use *last close* as anchor price
         price = float(close.iloc[-1])
         daily_vol_last = float(daily_volume.iloc[-1])
 
+        # Intraday 2m history for PM, VWAP, order flow, LIVE VOLUME
         premarket_pct = None
         vwap_dist = None
         order_flow_bias = None
@@ -741,13 +839,16 @@ def scan_one(
             iopen = intra["Open"]
             ivol = intra["Volume"]
 
+            # LIVE VOLUME REPLACEMENT: use cumulative intraday volume
             live_intraday_volume = float(ivol.sum())
 
+            # Premarket % from last two bars
             last_close = float(iclose.iloc[-1])
             prev_close_intraday = float(iclose.iloc[-2])
             if prev_close_intraday > 0:
                 premarket_pct = (last_close - prev_close_intraday) / prev_close_intraday * 100
 
+            # VWAP
             typical_price = (intra["High"] + intra["Low"] + intra["Close"]) / 3
             total_vol = ivol.sum()
             if total_vol > 0:
@@ -755,6 +856,7 @@ def scan_one(
                 if vwap_val > 0:
                     vwap_dist = (price - vwap_val) / vwap_val * 100
 
+            # Order-flow bias: buy vs sell volume
             of_df = intra[["Open", "Close", "Volume"]].dropna()
             if not of_df.empty:
                 sign = (of_df["Close"] > of_df["Open"]).astype(int) - (of_df["Close"] < of_df["Open"]).astype(int)
@@ -762,8 +864,9 @@ def scan_one(
                 sell_vol = float((of_df["Volume"] * (sign < 0)).sum())
                 total = buy_vol + sell_vol
                 if total > 0:
-                    order_flow_bias = buy_vol / total
+                    order_flow_bias = buy_vol / total  # 0..1
 
+        # --- FIX: True premarket price override when 2m bars are missing ---
         try:
             fi = stock.fast_info
             pre_price = fi.get("last_price", None)
@@ -771,18 +874,23 @@ def scan_one(
 
             if pre_price and prev_close and prev_close > 0:
                 calc_pm = (pre_price - prev_close) / prev_close * 100
+
+                # Only override during premarket hours (roughly before 9:30am ET ~ 14:30 UTC)
                 now = datetime.now(timezone.utc)
                 if now.hour < 14 or (now.hour == 14 and now.minute < 30):
                     premarket_pct = round(calc_pm, 2)
         except Exception:
             pass
 
+        # If we didn't get live intraday volume, fall back to daily
         if live_intraday_volume is None:
             live_intraday_volume = daily_vol_last
 
+        # Price/volume filters (may be ignored for watchlist via caller logic)
         if price > max_price or live_intraday_volume < min_volume:
             return None
 
+        # Momentum windows: yesterday, 3-day, 10-day
         if len(close) >= 2 and close.iloc[-2] > 0:
             yday_pct = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100
         else:
@@ -798,6 +906,7 @@ def scan_one(
         else:
             m10 = None
 
+        # RSI(7)
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(7).mean()
         loss = (-delta.clip(upper=0)).rolling(7).mean()
@@ -805,16 +914,20 @@ def scan_one(
         rsi_series = 100 - (100 / (1 + rs))
         rsi7 = float(rsi_series.iloc[-1])
 
+        # EMA10
         ema10 = float(close.ewm(span=10, adjust=False).mean().iloc[-1])
         ema_trend = "🔥 Breakout" if price > ema10 and rsi7 > 55 else "Neutral"
 
+        # 10-day RVOL using LIVE VOLUME vs average daily volume
         avg10 = float(daily_volume.mean()) if len(daily_volume) > 0 else 0
         rvol10 = live_intraday_volume / avg10 if avg10 > 0 else None
 
+        # Optional order-flow bias filter
         if enable_ofb_filter:
             if order_flow_bias is None or order_flow_bias < min_ofb:
                 return None
 
+        # Enrichment (float, short, news, sentiment)
         squeeze = False
         low_float = False
         catalyst = False
@@ -843,8 +956,9 @@ def scan_one(
                     pub = datetime.fromtimestamp(news[0]["providerPublishTime"], tz=timezone.utc)
                     catalyst = (datetime.now(timezone.utc) - pub).days <= 3
 
+                # sentiment scoring from multiple recent news items
                 sent_vals = []
-                for n in news[:5]:
+                for n in news[:5]:  # analyze up to 5 recent articles
                     t = n.get("title", "")
                     s = n.get("summary", "")
                     sent_vals.append(news_sentiment_score(t, s))
@@ -857,8 +971,10 @@ def scan_one(
             except Exception:
                 pass
 
+        # Multi-timeframe label
         mtf_label = multi_timeframe_label(premarket_pct, m3, m10)
 
+        # Score + ML-style probability
         score = short_window_score(
             pm=premarket_pct,
             yday=yday_pct,
@@ -875,9 +991,11 @@ def scan_one(
         )
         prob_rise = ml_breakout_probability(score, rvol10, premarket_pct, m10)
 
+        # Entry timing & breakout confirmation index
         entry_conf = entry_confidence_score(vwap_dist, rvol10, order_flow_bias)
         bci = breakout_confirmation_index(score, rvol10, premarket_pct, m10)
 
+        # AI commentary
         ai_text = ai_commentary(
             score=score,
             pm=premarket_pct,
@@ -891,13 +1009,14 @@ def scan_one(
             preopen_mode=preopen_mode,
         )
 
+        # Sparkline: 10d closes
         spark_series = close
 
         return {
             "Symbol": ticker,
             "Exchange": exchange,
             "Price": round(price, 2),
-            "Volume": int(live_intraday_volume),
+            "Volume": int(live_intraday_volume),  # 🔥 live intraday volume
             "Score": score,
             "Prob_Rise%": prob_rise,
             "PM%": round(premarket_pct, 2) if premarket_pct is not None else None,
@@ -940,6 +1059,9 @@ def run_scan(
     ignore_filters_for_watchlist_flag: bool,
     vwap_enabled_flag: bool,
 ):
+    """
+    V11/V12 lightning engine.
+    """
     universe = build_universe(
         watchlist_text,
         max_universe,
@@ -948,13 +1070,15 @@ def run_scan(
     )
     results = []
 
+    # If ignoring filters for watchlist and watchlist is populated,
+    # we temporarily relax min_volume & max_price via globals-like hack
     global min_volume, max_price
     saved_min_volume = min_volume
     saved_max_price = max_price
 
     if ignore_filters_for_watchlist_flag and watchlist_text.strip():
         min_volume = 0
-        max_price = 10_000.0
+        max_price = 10_000.0  # effectively disable
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as ex:
@@ -975,6 +1099,7 @@ def run_scan(
                 if res:
                     results.append(res)
     finally:
+        # restore filters for rest of app
         min_volume = saved_min_volume
         max_price = saved_max_price
 
@@ -1028,6 +1153,7 @@ if "alerted" not in st.session_state:
 
 
 def trigger_audio_alert(symbol: str, reason: str):
+    """Play sound + mark symbol as alerted once per session."""
     st.session_state.alerted.add(symbol)
     audio_html = """
     <audio autoplay>
@@ -1041,9 +1167,9 @@ def trigger_audio_alert(symbol: str, reason: str):
 # ========================= MAIN DISPLAY =========================
 with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
     if use_last_results and "last_df" in st.session_state:
-        df = st.session_state["last_df"].copy()
+        df_raw = st.session_state["last_df"].copy()
     else:
-        df = run_scan(
+        df_raw = run_scan(
             watchlist_text,
             max_universe,
             enable_enrichment,
@@ -1053,13 +1179,60 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
             volume_rank_pool,
             preopen_mode,
             ignore_filters_for_watchlist,
-            vwap_only,
+            vwap_only,  # vwap_enabled_flag
         )
-        st.session_state["last_df"] = df.copy()
+        st.session_state["last_df"] = df_raw.copy()
 
-if df.empty:
+if df_raw.empty:
     st.error("No results found. Try adding a watchlist or relaxing filters.")
 else:
+    # === NEW: Finviz precompute + ALWAYS seed any ticker that has Finviz news ===
+    finviz_cache: dict[str, list[dict]] = {}
+    now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Map of existing seed entries for quick updates
+    seed_map = {entry["Symbol"]: entry for entry in st.session_state.seed_universe}
+
+    # Fetch Finviz news for every symbol in df_raw (pre-filters)
+    for sym in df_raw["Symbol"].unique():
+        try:
+            items = get_finviz_news_for_ticker(sym)
+        except Exception:
+            items = []
+        finviz_cache[sym] = items
+
+        if items:
+            # ✅ ANY ticker with ANY Finviz news should be part of the seed
+            if sym in seed_map:
+                # update LastNewsSeed timestamp
+                seed_map[sym]["LastNewsSeed"] = now_utc_str
+            else:
+                # find exchange from df_raw for this symbol
+                try:
+                    ex = df_raw.loc[df_raw["Symbol"] == sym, "Exchange"].iloc[0]
+                except Exception:
+                    ex = "UNKNOWN"
+                entry = {
+                    "Symbol": sym,
+                    "Exchange": ex,
+                    "LastNewsSeed": now_utc_str,
+                }
+                st.session_state.seed_universe.append(entry)
+                seed_map[sym] = entry
+
+    # Update seed size
+    st.session_state.seed_universe_size = len(st.session_state.seed_universe)
+
+    # Add Finviz columns to df_raw (for later filtering / display)
+    df_raw["FinvizNews"] = df_raw["Symbol"].map(lambda s: bool(finviz_cache.get(s)))
+    df_raw["LastNewsSeed"] = df_raw["Symbol"].map(
+        lambda s: seed_map.get(s, {}).get("LastNewsSeed")
+    )
+
+    # ========================= APPLY FILTERS =========================
+    df = df_raw.copy()
+
+    # Apply filters (unless ignore_filters_for_watchlist is on with non-empty watchlist)
     if not (ignore_filters_for_watchlist and watchlist_text.strip()):
         df = df[df["Score"] >= min_breakout]
 
@@ -1074,286 +1247,288 @@ else:
         if vwap_only:
             df = df[df["VWAP%"].fillna(-999) > 0]
 
+        # NEW FILTERS: Breakout_Confirm & Entry_Confidence
         if min_breakout_confirm > 0.0 and "Breakout_Confirm" in df.columns:
             df = df[df["Breakout_Confirm"].fillna(-1) >= min_breakout_confirm]
 
         if min_entry_confidence > 0.0 and "Entry_Confidence" in df.columns:
             df = df[df["Entry_Confidence"].fillna(-1) >= min_entry_confidence]
 
+    # Strict Finviz display filter (does NOT affect seeding)
+    if catalyst_finviz_only:
+        df = df[df["FinvizNews"]]
+
     if df.empty:
-        st.error("No results left after filters. Try relaxing constraints or disabling 'Ignore filters' toggle.")
+        st.error("No results left after filters. Try relaxing constraints.")
     else:
-        # === Precompute Finviz news and strict Finviz filter ===
-        finviz_cache = {}
-        for sym in df["Symbol"].unique():
+        # Sort by breakout score and Finviz presence, then PM and RSI7
+        df = df.sort_values(
+            by=["Score", "FinvizNews", "PM%", "RSI7"],
+            ascending=[False, False, False, False],
+        )
+
+        st.subheader(f"🔥 10-Day Momentum Board (V12) — {len(df)} symbols")
+
+        # Alert banner
+        if enable_alerts and st.session_state.alerted:
+            alerted_list = ", ".join(sorted(st.session_state.alerted))
+            st.info(f"🔔 Active alert symbols: {alerted_list}")
+
+        # ========================= PER-SYMBOL CARDS =========================
+        for _, row in df.iterrows():
+            sym = row["Symbol"]
+            finviz_items = finviz_cache.get(sym, [])
+            has_finviz = bool(finviz_items)
+            last_news_seed = row.get("LastNewsSeed", None)
+
+            # Audio alerts (once per symbol, if enabled) — after all filters
+            if enable_alerts and sym not in st.session_state.alerted:
+                if row["Score"] is not None and row["Score"] >= ALERT_SCORE_THRESHOLD:
+                    trigger_audio_alert(sym, f"Score {row['Score']}")
+                elif row["PM%"] is not None and row["PM%"] >= ALERT_PM_THRESHOLD:
+                    trigger_audio_alert(sym, f"Premarket {row['PM%']}%")
+                elif row["VWAP%"] is not None and row["VWAP%"] >= ALERT_VWAP_THRESHOLD:
+                    trigger_audio_alert(sym, f"VWAP Dist {row['VWAP%']}%")
+
+            c1, c2, c3, c4 = st.columns([2, 3, 3, 3])
+
+            # Column 1: Basic info + score + volume + seed info
+            c1.markdown(f"**{sym}** ({row['Exchange']})")
+
+            if has_finviz:
+                c1.markdown("🔥 **Catalyst (Finviz)**")
+            else:
+                c1.markdown("⚪ No Finviz Catalyst")
+
+            c1.write(f"💲 Price: {row['Price']}")
+            c1.write(f"📊 Live Volume: {row['Volume']:,}")
+            c1.write(f"🔥 Score: **{row['Score']}**")
+            c1.write(f"🤖 ML Prob_Rise: {row['Prob_Rise%']}%")
+            c1.write(f"{row['MTF_Trend']}")
+            c1.write(f"Trend: {row['EMA10 Trend']}")
+
+            # NEW: show LastNewsSeed timestamp on card
+            if last_news_seed:
+                c1.caption(f"Last News Seeded: {last_news_seed}")
+            else:
+                c1.caption("Last News Seeded: —")
+
+            # 🎯 AI Target & 🛑 Stop (simple heuristic, not advice)
+            price_val = float(row["Price"])
+            bci_val = row.get("Breakout_Confirm", 0.0)
+            entry_val = row.get("Entry_Confidence", 0.0)
+
             try:
-                items = get_finviz_news_for_ticker(sym)
+                if bci_val is None or pd.isna(bci_val):
+                    bci_val = 0.0
+                if entry_val is None or pd.isna(entry_val):
+                    entry_val = 0.0
             except Exception:
-                items = []
-            finviz_cache[sym] = items
+                bci_val = bci_val or 0.0
+                entry_val = entry_val or 0.0
 
-        df["FinvizNews"] = df["Symbol"].map(lambda s: bool(finviz_cache.get(s)))
+            ai_target = round(price_val * (1 + (bci_val / 250.0) + (entry_val / 400.0)), 2)
+            ai_stop = round(price_val * (1 - (1 - entry_val / 100.0) * 0.05), 2)
 
-        if catalyst_finviz_only:
-            df = df[df["FinvizNews"]]
+            c1.write(f"🎯 AI Target: **${ai_target}**")
+            c1.write(f"🛑 AI Stop: **${ai_stop}**")
 
-        if df.empty:
-            st.error("No results left after Finviz catalyst filter.")
-        else:
-            df = df.sort_values(
-                by=["Score", "FinvizNews", "PM%", "RSI7"],
-                ascending=[False, False, False, False],
-            )
+            try:
+                rr = (ai_target - price_val) / max(0.01, (price_val - ai_stop))
+                rr_text = f"{rr:.2f} : 1"
+            except Exception:
+                rr = None
+                rr_text = "—"
 
-            st.subheader(f"🔥 10-Day Momentum Board (V12) — {len(df)} symbols")
+            c1.write(f"📈 R:R: **{rr_text}**")
 
-            if enable_alerts and st.session_state.alerted:
-                alerted_list = ", ".join(sorted(st.session_state.alerted))
-                st.info(f"🔔 Active alert symbols: {alerted_list}")
+            # --- AI Explanation for Targets/Stops ---
+            ai_expl_list = []
 
-            for _, row in df.iterrows():
-                sym = row["Symbol"]
-                finviz_items = finviz_cache.get(sym, [])
-                has_finviz = bool(finviz_items)
+            # Breakout confirmation
+            if bci_val >= 70:
+                ai_expl_list.append("Breakout structure strongly confirmed.")
+            elif bci_val >= 50:
+                ai_expl_list.append("Moderate breakout confirmation present.")
+            else:
+                ai_expl_list.append("Weak confirmation — target conservative.")
 
-                # auto-add Finviz-news tickers to seed
-                if has_finviz:
-                    existing_syms = {s["Symbol"] for s in st.session_state.seed_universe}
-                    if sym not in existing_syms:
-                        st.session_state.seed_universe.append(
-                            {"Symbol": sym, "Exchange": row["Exchange"]}
+            # Entry timing
+            if entry_val >= 70:
+                ai_expl_list.append("Entry confidence high; tape favoring long entries.")
+            elif entry_val >= 50:
+                ai_expl_list.append("Entry timing acceptable.")
+            else:
+                ai_expl_list.append("Entry window uncertain; volatility elevated.")
+
+            # VWAP positioning
+            if row["VWAP%"] is not None:
+                if row["VWAP%"] > 0:
+                    ai_expl_list.append("Price holding above VWAP (bullish positioning).")
+                else:
+                    ai_expl_list.append("Below VWAP — higher risk of failed breakout.")
+
+            # 10-day trend
+            if row["10D%"] is not None:
+                if row["10D%"] > 0:
+                    ai_expl_list.append("10-day trend supportive.")
+                else:
+                    ai_expl_list.append("10-day trend weak — target reduced.")
+
+            # Order Flow Bias
+            flow = row.get("FlowBias", None)
+            if flow is not None:
+                if flow > 0.6:
+                    ai_expl_list.append("Buyers absorbing dips; strong participation.")
+                elif flow < 0.4:
+                    ai_expl_list.append("Sellers active — cautious stop placement.")
+
+            # Final AI narrative
+            ai_target_expl = " ".join(ai_expl_list)
+            c1.markdown(f"🧠 **AI Target Rationale:** {ai_target_expl}")
+
+            # Column 2: Momentum snapshot + confirmation
+            c2.write(f"PM%: {row['PM%']}")
+            c2.write(f"YDay%: {row['YDay%']}")
+            c2.write(f"3D%: {row['3D%']}  |  10D%: {row['10D%']}")
+            c2.write(f"RSI7: {row['RSI7']}  |  RVOL_10D: {row['RVOL_10D']}x")
+            c2.write(f"Breakout Confirm: {row.get('Breakout_Confirm', 0)} / 100")
+            c2.write(f"Entry Confidence: {row.get('Entry_Confidence', 0)} / 100")
+
+            # Column 3: Microstructure + AI commentary + SHORTS + Finviz headlines
+            c3.write(f"VWAP Dist %: {row['VWAP%']}")
+            c3.write(f"Order Flow Bias: {row['FlowBias']}")
+            if enable_enrichment:
+                c3.write(
+                    f"Squeeze: {row['Squeeze?']} | LowFloat: {row['LowFloat?']}"
+                )
+                c3.write(f"Sec/Ind: {row['Sector']} / {row['Industry']}")
+                c3.write(f"News Sentiment: {row.get('Sentiment', 0)}")
+            else:
+                c3.write("Enrichment: OFF (float/short/news skipped for speed)")
+
+            # Fintel short data (display only)
+            try:
+                short_data = get_fintel_short_data(sym)
+            except Exception:
+                short_data = None
+
+            if short_data and (short_data.get("shares") or short_data.get("fee")):
+                shares_txt = short_data.get("shares") or "—"
+                fee_txt = short_data.get("fee") or "—"
+                time_txt = short_data.get("time")
+                c3.write(f"Shortable (Fintel): {shares_txt}")
+                c3.write(f"Borrow Fee (Fintel): {fee_txt}")
+                if time_txt:
+                    c3.write(f"Short Data Time: {time_txt}")
+            else:
+                c3.write("Shortable (Fintel): n/a")
+
+            # AI commentary line
+            c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
+
+            # Ticker-specific Finviz news
+            with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
+                if not finviz_items:
+                    st.write("No recent Finviz headlines found for this ticker.")
+                else:
+                    for n in finviz_items:
+                        st.markdown(
+                            f"{n['sent']} "
+                            f"[{n['title']}]({n['url']})  \n"
+                            f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
+                            unsafe_allow_html=True,
                         )
-                        st.session_state.seed_universe_size = len(st.session_state.seed_universe)
 
-                # audio alerts AFTER all filters (including Finviz strict)
-                if enable_alerts and sym not in st.session_state.alerted:
-                    if row["Score"] is not None and row["Score"] >= ALERT_SCORE_THRESHOLD:
-                        trigger_audio_alert(sym, f"Score {row['Score']}")
-                    elif row["PM%"] is not None and row["PM%"] >= ALERT_PM_THRESHOLD:
-                        trigger_audio_alert(sym, f"Premarket {row['PM%']}%")
-                    elif row["VWAP%"] is not None and row["VWAP%"] >= ALERT_VWAP_THRESHOLD:
-                        trigger_audio_alert(sym, f"VWAP Dist {row['VWAP%']}%")
+            # Column 4: Sparkline + full chart
+            c4.plotly_chart(sparkline(row["Spark"]), use_container_width=False)
+            with c4.expander("📊 View 10-day chart"):
+                c4.plotly_chart(bigline(row["Spark"], f"{sym} - Last 10 Days"), use_container_width=True)
 
-                c1, c2, c3, c4 = st.columns([2, 3, 3, 3])
+            st.divider()
 
-                # Column 1: header + catalyst badge
-                c1.markdown(f"**{sym}** ({row['Exchange']})")
+        # V11/V12: Watchlist multi-view panels
+        raw_watch = watchlist_text.strip()
+        if raw_watch:
+            raw = raw_watch.replace("\n", " ").replace(",", " ").split()
+            wl_tickers = sorted(set(s.upper() for s in raw if s.strip()))
+            wl_df = df[df["Symbol"].isin(wl_tickers)]
 
-                if catalyst_finviz_only:
-                    c1.markdown("🔥 **Catalyst (Finviz)**")
+            if not wl_df.empty:
+                st.subheader("📋 Watchlist Multi-View (V11/V12)")
+                st.dataframe(
+                    wl_df[
+                        [
+                            "Symbol",
+                            "Price",
+                            "Volume",
+                            "Score",
+                            "Prob_Rise%",
+                            "PM%",
+                            "10D%",
+                            "RVOL_10D",
+                            "VWAP%",
+                            "FlowBias",
+                            "Breakout_Confirm",
+                            "Entry_Confidence",
+                        ]
+                    ],
+                    use_container_width=True,
+                )
+
+        # Download current table
+        csv_cols = [
+            "Symbol",
+            "Exchange",
+            "Price",
+            "Volume",
+            "Score",
+            "Prob_Rise%",
+            "PM%",
+            "YDay%",
+            "3D%",
+            "10D%",
+            "RSI7",
+            "EMA10 Trend",
+            "RVOL_10D",
+            "VWAP%",
+            "FlowBias",
+            "Squeeze?",
+            "LowFloat?",
+            "Short % Float",
+            "Sector",
+            "Industry",
+            "Catalyst",
+            "MTF_Trend",
+            "AI_Commentary",
+            "Sentiment",
+            "Entry_Confidence",
+            "Breakout_Confirm",
+            "FinvizNews",
+            "LastNewsSeed",
+        ]
+        csv_cols = [c for c in csv_cols if c in df.columns]
+
+        st.download_button(
+            "📥 Download Screener CSV",
+            data=df[csv_cols].to_csv(index=False),
+            file_name="v12_10day_momentum_screener_hybrid_ml_ai.csv",
+            mime="text/csv",
+        )
+
+        # Optional: show today's overall Finviz headlines
+        with st.expander("📰 Today's Market Headlines (Finviz)"):
+            try:
+                finviz_news_today = get_finviz_news_today()
+                if not finviz_news_today:
+                    st.write("No Finviz headlines found for today yet.")
                 else:
-                    if has_finviz:
-                        c1.markdown("🔥 **Catalyst (Finviz)**")
-                    else:
-                        c1.markdown("⚪ No Finviz Catalyst")
-
-                c1.write(f"💲 Price: {row['Price']}")
-                c1.write(f"📊 Live Volume: {row['Volume']:,}")
-                c1.write(f"🔥 Score: **{row['Score']}**")
-                c1.write(f"🤖 ML Prob_Rise: {row['Prob_Rise%']}%")
-                c1.write(f"{row['MTF_Trend']}")
-                c1.write(f"Trend: {row['EMA10 Trend']}")
-
-                price_val = float(row["Price"])
-                bci_val = row.get("Breakout_Confirm", 0.0)
-                entry_val = row.get("Entry_Confidence", 0.0)
-
-                try:
-                    if bci_val is None or pd.isna(bci_val):
-                        bci_val = 0.0
-                    if entry_val is None or pd.isna(entry_val):
-                        entry_val = 0.0
-                except Exception:
-                    bci_val = bci_val or 0.0
-                    entry_val = entry_val or 0.0
-
-                ai_target = round(price_val * (1 + (bci_val / 250.0) + (entry_val / 400.0)), 2)
-                ai_stop = round(price_val * (1 - (1 - entry_val / 100.0) * 0.05), 2)
-
-                c1.write(f"🎯 AI Target: **${ai_target}**")
-                c1.write(f"🛑 AI Stop: **${ai_stop}**")
-
-                try:
-                    rr = (ai_target - price_val) / max(0.01, (price_val - ai_stop))
-                    rr_text = f"{rr:.2f} : 1"
-                except Exception:
-                    rr = None
-                    rr_text = "—"
-
-                c1.write(f"📈 R:R: **{rr_text}**")
-
-                ai_expl_list = []
-
-                if bci_val >= 70:
-                    ai_expl_list.append("Breakout structure strongly confirmed.")
-                elif bci_val >= 50:
-                    ai_expl_list.append("Moderate breakout confirmation present.")
-                else:
-                    ai_expl_list.append("Weak confirmation — target conservative.")
-
-                if entry_val >= 70:
-                    ai_expl_list.append("Entry confidence high; tape favoring long entries.")
-                elif entry_val >= 50:
-                    ai_expl_list.append("Entry timing acceptable.")
-                else:
-                    ai_expl_list.append("Entry window uncertain; volatility elevated.")
-
-                if row["VWAP%"] is not None:
-                    if row["VWAP%"] > 0:
-                        ai_expl_list.append("Price holding above VWAP (bullish positioning).")
-                    else:
-                        ai_expl_list.append("Below VWAP — higher risk of failed breakout.")
-
-                if row["10D%"] is not None:
-                    if row["10D%"] > 0:
-                        ai_expl_list.append("10-day trend supportive.")
-                    else:
-                        ai_expl_list.append("10-day trend weak — target reduced.")
-
-                flow = row.get("FlowBias", None)
-                if flow is not None:
-                    if flow > 0.6:
-                        ai_expl_list.append("Buyers absorbing dips; strong participation.")
-                    elif flow < 0.4:
-                        ai_expl_list.append("Sellers active — cautious stop placement.")
-
-                ai_target_expl = " ".join(ai_expl_list)
-                c1.markdown(f"🧠 **AI Target Rationale:** {ai_target_expl}")
-
-                # Column 2
-                c2.write(f"PM%: {row['PM%']}")
-                c2.write(f"YDay%: {row['YDay%']}")
-                c2.write(f"3D%: {row['3D%']}  |  10D%: {row['10D%']}")
-                c2.write(f"RSI7: {row['RSI7']}  |  RVOL_10D: {row['RVOL_10D']}x")
-                c2.write(f"Breakout Confirm: {row.get('Breakout_Confirm', 0)} / 100")
-                c2.write(f"Entry Confidence: {row.get('Entry_Confidence', 0)} / 100")
-
-                # Column 3: microstructure + shorts + Finviz headlines
-                c3.write(f"VWAP Dist %: {row['VWAP%']}")
-                c3.write(f"Order Flow Bias: {row['FlowBias']}")
-                if enable_enrichment:
-                    c3.write(f"Squeeze: {row['Squeeze?']} | LowFloat: {row['LowFloat?']}")
-                    c3.write(f"Sec/Ind: {row['Sector']} / {row['Industry']}")
-                    c3.write(f"News Sentiment: {row.get('Sentiment', 0)}")
-                else:
-                    c3.write("Enrichment: OFF (float/short/news skipped for speed)")
-
-                try:
-                    short_data = get_fintel_short_data(sym)
-                except Exception:
-                    short_data = None
-
-                if short_data and (short_data.get("shares") or short_data.get("fee")):
-                    shares_txt = short_data.get("shares") or "—"
-                    fee_txt = short_data.get("fee") or "—"
-                    time_txt = short_data.get("time")
-                    c3.write(f"Shortable (Fintel): {shares_txt}")
-                    c3.write(f"Borrow Fee (Fintel): {fee_txt}")
-                    if time_txt:
-                        c3.write(f"Short Data Time: {time_txt}")
-                else:
-                    c3.write("Shortable (Fintel): n/a")
-
-                c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
-
-                # Ticker-specific Finviz news
-                with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
-                    if not finviz_items:
-                        st.write("No recent Finviz headlines found for this ticker.")
-                    else:
-                        for n in finviz_items:
-                            st.markdown(
-                                f"{n['sent']} "
-                                f"[{n['title']}]({n['url']})  \n"
-                                f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
-                                unsafe_allow_html=True,
-                            )
-
-                # Column 4
-                c4.plotly_chart(sparkline(row["Spark"]), use_container_width=False)
-                with c4.expander("📊 View 10-day chart"):
-                    c4.plotly_chart(bigline(row["Spark"], f"{sym} - Last 10 Days"), use_container_width=True)
-
-                st.divider()
-
-            # Watchlist multi-view
-            raw_watch = watchlist_text.strip()
-            if raw_watch:
-                raw = raw_watch.replace("\n", " ").replace(",", " ").split()
-                wl_tickers = sorted(set(s.upper() for s in raw if s.strip()))
-                wl_df = df[df["Symbol"].isin(wl_tickers)]
-
-                if not wl_df.empty:
-                    st.subheader("📋 Watchlist Multi-View (V11/V12)")
-                    st.dataframe(
-                        wl_df[
-                            [
-                                "Symbol",
-                                "Price",
-                                "Volume",
-                                "Score",
-                                "Prob_Rise%",
-                                "PM%",
-                                "10D%",
-                                "RVOL_10D",
-                                "VWAP%",
-                                "FlowBias",
-                                "Breakout_Confirm",
-                                "Entry_Confidence",
-                            ]
-                        ],
-                        use_container_width=True,
-                    )
-
-            csv_cols = [
-                "Symbol",
-                "Exchange",
-                "Price",
-                "Volume",
-                "Score",
-                "Prob_Rise%",
-                "PM%",
-                "YDay%",
-                "3D%",
-                "10D%",
-                "RSI7",
-                "EMA10 Trend",
-                "RVOL_10D",
-                "VWAP%",
-                "FlowBias",
-                "Squeeze?",
-                "LowFloat?",
-                "Short % Float",
-                "Sector",
-                "Industry",
-                "Catalyst",
-                "MTF_Trend",
-                "AI_Commentary",
-                "Sentiment",
-                "Entry_Confidence",
-                "Breakout_Confirm",
-            ]
-            csv_cols = [c for c in csv_cols if c in df.columns]
-
-            st.download_button(
-                "📥 Download Screener CSV",
-                data=df[csv_cols].to_csv(index=False),
-                file_name="v12_10day_momentum_screener_hybrid_ml_ai.csv",
-                mime="text/csv",
-            )
-
-            # Global Finviz news
-            with st.expander("📰 Today's Market Headlines (Finviz)"):
-                try:
-                    finviz_news = get_finviz_news_today()
-                    if not finviz_news:
-                        st.write("No Finviz headlines found for today yet.")
-                    else:
-                        for n in finviz_news:
-                            st.markdown(
-                                f"**{n['time']}** — [{n['title']}]({n['url']})"
-                            )
-                except Exception:
-                    st.write("⚠ Could not fetch Finviz daily headlines.")
+                    for n in finviz_news_today:
+                        st.markdown(
+                            f"**{n['time']}** — [{n['title']}]({n['url']})"
+                        )
+            except Exception:
+                st.write("⚠ Could not fetch Finviz daily headlines.")
 
 st.caption("For research and education only. Not financial advice.")
+
