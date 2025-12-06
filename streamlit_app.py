@@ -304,8 +304,9 @@ with st.sidebar:
         "Finviz News Catalyst Required",
         value=False,
         help=(
-            "When enabled, only show tickers that currently have headlines on Finviz "
-            "for their symbol. (Seeding still happens for any news, even if this is off.)"
+            "PURE FINVIZ MODE: when enabled, all numeric filters are ignored and "
+            "only tickers with current Finviz headlines are shown. "
+            "Momentum stats still calculated for ranking."
         ),
     )
 
@@ -1169,13 +1170,20 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
     if use_last_results and "last_df" in st.session_state:
         df_raw = st.session_state["last_df"].copy()
     else:
+        # 🔥 Finviz Pure Mode + Volume-Ranked Universe:
+        # when Finviz News Catalyst Required is ON and no watchlist is given,
+        # force universe_mode to Live Volume Ranked (slower).
+        effective_universe_mode = universe_mode
+        if catalyst_finviz_only and not watchlist_text.strip():
+            effective_universe_mode = "Live Volume Ranked (slower)"
+
         df_raw = run_scan(
             watchlist_text,
             max_universe,
             enable_enrichment,
             enable_ofb_filter,
             min_ofb,
-            universe_mode,
+            effective_universe_mode,
             volume_rank_pool,
             preopen_mode,
             ignore_filters_for_watchlist,
@@ -1230,33 +1238,37 @@ else:
     )
 
     # ========================= APPLY FILTERS =========================
-    df = df_raw.copy()
 
-    # Apply numeric filters (unless ignore_filters_for_watchlist is on with non-empty watchlist)
-    if not (ignore_filters_for_watchlist and watchlist_text.strip()):
-        df = df[df["Score"] >= min_breakout]
-
-        if min_pm_move != 0.0:
-            df = df[df["PM%"].fillna(-999) >= min_pm_move]
-        if min_yday_gain != 0.0:
-            df = df[df["YDay%"].fillna(-999) >= min_yday_gain]
-        if squeeze_only:
-            df = df[df["Squeeze?"]]
-        if catalyst_only:
-            df = df[df["Catalyst"]]
-        if vwap_only:
-            df = df[df["VWAP%"].fillna(-999) > 0]
-
-        # NEW FILTERS: Breakout_Confirm & Entry_Confidence
-        if min_breakout_confirm > 0.0 and "Breakout_Confirm" in df.columns:
-            df = df[df["Breakout_Confirm"].fillna(-1) >= min_breakout_confirm]
-
-        if min_entry_confidence > 0.0 and "Entry_Confidence" in df.columns:
-            df = df[df["Entry_Confidence"].fillna(-1) >= min_entry_confidence]
-
-    # Strict Finviz display filter (Option B: news required + momentum sorting preserved)
+    # 🔥 PURE FINVIZ MODE:
+    # if Finviz News Catalyst Required is ON, we ignore all numeric filters
+    # and only show symbols that actually have Finviz news. Momentum stats
+    # are still calculated and used for sorting/alerts.
     if catalyst_finviz_only:
-        df = df[df["FinvizNews"]]
+        df = df_raw[df_raw["FinvizNews"]].copy()
+    else:
+        df = df_raw.copy()
+
+        # Apply numeric filters (unless ignore_filters_for_watchlist is on with non-empty watchlist)
+        if not (ignore_filters_for_watchlist and watchlist_text.strip()):
+            df = df[df["Score"] >= min_breakout]
+
+            if min_pm_move != 0.0:
+                df = df[df["PM%"].fillna(-999) >= min_pm_move]
+            if min_yday_gain != 0.0:
+                df = df[df["YDay%"].fillna(-999) >= min_yday_gain]
+            if squeeze_only:
+                df = df[df["Squeeze?"]]
+            if catalyst_only:
+                df = df[df["Catalyst"]]
+            if vwap_only:
+                df = df[df["VWAP%"].fillna(-999) > 0]
+
+            # NEW FILTERS: Breakout_Confirm & Entry_Confidence
+            if min_breakout_confirm > 0.0 and "Breakout_Confirm" in df.columns:
+                df = df[df["Breakout_Confirm"].fillna(-1) >= min_breakout_confirm]
+
+            if min_entry_confidence > 0.0 and "Entry_Confidence" in df.columns:
+                df = df[df["Entry_Confidence"].fillna(-1) >= min_entry_confidence]
 
     if df.empty:
         st.error("No results left after filters. Try relaxing constraints.")
@@ -1307,7 +1319,7 @@ else:
             c1.write(f"{row['MTF_Trend']}")
             c1.write(f"Trend: {row['EMA10 Trend']}")
 
-            # NEW: show LastNewsSeed timestamp on card
+            # show LastNewsSeed timestamp on card
             if last_news_seed:
                 c1.caption(f"Last News Seeded: {last_news_seed}")
             else:
@@ -1531,5 +1543,6 @@ else:
                 st.write("⚠ Could not fetch Finviz daily headlines.")
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
