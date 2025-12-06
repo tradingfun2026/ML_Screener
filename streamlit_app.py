@@ -16,58 +16,87 @@ import pytz
 
 
 # ========================= FINVIZ / FINTEL HELPERS =========================
-def get_finviz_news_for_ticker(ticker: str, max_items: int = 6):
+def get_finviz_news_for_ticker(ticker: str, max_items: int = 12):
     """
-    Scrape Finviz for headlines related only to the given ticker.
-    Returns a list of dicts: {time, title, sent, url}
+    Scrape Finviz news headlines for a ticker.
+    Handles bot-blocking by using a full browser fingerprint
+    and retries if the first attempt fails.
+    Returns list of dicts: {time, title, sent, url}
     """
-    url = f"https://finviz.com/quote.ashx?t={ticker}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-    except Exception:
-        return []
-    if resp.status_code != 200:
+    url = f"https://finviz.com/quote.ashx?t={ticker}&p=d"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://finviz.com/",
+    }
+
+    def fetch():
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+            if r.status_code != 200:
+                return None
+            return BeautifulSoup(r.text, "html.parser")
+        except Exception:
+            return None
+
+    soup = None
+    for _ in range(3):  # up to 3 attempts
+        soup = fetch()
+        if soup:
+            break
+
+    if not soup:
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    table = soup.select_one("table.fullview-news-outer")
+    if not table:
+        return []
+
+    rows = table.select("tr")
     items = []
-    rows = soup.select("table.fullview-news-outer table tr")
 
     for row in rows[:max_items]:
-        tds = row.find_all("td")
-        if len(tds) < 2:
-            continue
-        time_text = tds[0].get_text(strip=True)
-        link = tds[1].find("a")
-        if not link:
+        parts = row.find_all("td")
+        if len(parts) < 2:
             continue
 
-        title = link.get_text(strip=True)
-        news_url = "https://finviz.com/" + link["href"].lstrip("/")
+        time_text = parts[0].get_text(strip=True)
+        link_tag = parts[1].find("a")
+        if not link_tag:
+            continue
 
-        # Simple sentiment via keywords
+        title = link_tag.get_text(strip=True)
+        news_url = "https://finviz.com/" + link_tag["href"].lstrip("/")
+
         lower = title.lower()
         if any(
-            w in lower
-            for w in [
+            x in lower
+            for x in [
                 "up",
                 "surge",
-                "record",
                 "beat",
                 "beats",
                 "growth",
                 "upgrade",
                 "upgrades",
                 "bull",
-                "bulish",
                 "bullish",
+                "record",
+                "rally",
+                "soar",
+                "soars",
             ]
         ):
             sentiment = "🟢"
         elif any(
-            w in lower
-            for w in [
+            x in lower
+            for x in [
                 "down",
                 "fall",
                 "falls",
@@ -75,12 +104,12 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 6):
                 "misses",
                 "plunge",
                 "warning",
-                "cut",
-                "cuts",
                 "downgrade",
                 "downgrades",
                 "bear",
                 "bearish",
+                "cut",
+                "cuts",
             ]
         ):
             sentiment = "🔴"
@@ -88,13 +117,9 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 6):
             sentiment = "⚪"
 
         items.append(
-            {
-                "time": time_text,
-                "title": title,
-                "sent": sentiment,
-                "url": news_url,
-            }
+            {"time": time_text, "title": title, "sent": sentiment, "url": news_url}
         )
+
     return items
 
 
@@ -103,7 +128,17 @@ def get_finviz_news_today():
     Pull general market headlines for today only, as on Finviz news page.
     """
     url = "https://finviz.com/news.ashx"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://finviz.com/",
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=10)
     except Exception:
@@ -140,7 +175,14 @@ def get_fintel_short_data(ticker: str):
     Returns dict {time, shares, fee} or None.
     """
     url = f"https://fintel.io/s/us/{ticker.lower()}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=10)
     except Exception:
@@ -156,7 +198,7 @@ def get_fintel_short_data(ticker: str):
         rows = table.find_all("tr")
         if len(rows) < 2:
             continue
-        for row in rows[1:3]:  # look at first couple of rows
+        for row in rows[1:3]:
             cells = row.find_all("td")
             if len(cells) < 3:
                 continue
@@ -505,14 +547,12 @@ def build_universe(
                 t = yf.Ticker(sym["Symbol"])
                 d = t.history(period="1d", interval=INTRADAY_INTERVAL, prepost=True)
                 if not d.empty:
-                    # Live volume = cumulative intraday volume
                     live_vol = float(d["Volume"].sum())
                     ranked.append({**sym, "LiveVol": live_vol})
             except Exception:
                 continue
 
         if not ranked:
-            # fallback to classic if volume fetch fails
             universe = syms[:max_universe]
         else:
             ranked_sorted = sorted(
@@ -556,7 +596,6 @@ def short_window_score(
     """
     score = 0.0
 
-    # Pre-open mode tweaks weights a bit toward PM & RVOL
     pm_w = 2.0 if preopen_mode else 1.6
     m10_w = 0.3 if preopen_mode else 0.6
     rvol_w = 2.6 if preopen_mode else 2.0
@@ -576,7 +615,6 @@ def short_window_score(
     if rvol10 is not None and rvol10 > 1.2:
         score += (rvol10 - 1.2) * rvol_w
 
-    # 👉 VWAP bonus only applied when vwap_enabled
     if vwap_enabled and vwap is not None and vwap > 0:
         score += min(vwap, 6) * 1.5
 
@@ -694,19 +732,16 @@ def entry_confidence_score(vwap_dist, rvol10, flow_bias) -> float:
 
     score = 60.0
 
-    # ideal VWAP zone: 0 to +3%
     if -1 <= vwap_dist <= 3:
         score += 15
     elif abs(vwap_dist) > 8:
         score -= 15
 
-    # RVOL contribution
     if rvol10 > 2:
         score += 10
     elif rvol10 < 0.7:
         score -= 10
 
-    # order flow bias
     score += (flow_bias - 0.5) * 40.0
 
     return round(max(0.0, min(100.0, score)), 1)
@@ -716,7 +751,7 @@ def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
     """
     Breakout confirmation index 0–100 combining score, RVOL, PM, and 10D trend.
     """
-    base = (score or 0) / 2.0  # 0–100 if score ~ 0–200
+    base = (score or 0) / 2.0
     if rvol10 is not None:
         base += max(0.0, (rvol10 - 1.0) * 8.0)
     if pm is not None:
@@ -731,7 +766,6 @@ def breakout_confirmation_index(score, rvol10, pm, m10) -> float:
 def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_conf, bci, preopen_mode):
     comments = []
 
-    # High level regime
     if score is not None:
         if score >= 90:
             comments.append("Explosive momentum profile, risk-on candidate.")
@@ -740,28 +774,24 @@ def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_co
         elif score >= 30:
             comments.append("Early momentum, still needs confirmation.")
 
-    # Premarket behavior
     if pm is not None:
         if pm > 5:
             comments.append("Strong premarket demand showing early accumulation.")
         elif pm < -3:
             comments.append("Notable premarket supply; caution on chasing intraday pops.")
 
-    # Volume / liquidity
     if rvol is not None:
         if rvol > 2:
             comments.append("Volume aggressively expanding vs 10-day baseline.")
         elif rvol < 0.7:
             comments.append("Liquidity muted; slippage/whipsaws more likely.")
 
-    # Order flow
     if flow_bias is not None:
         if flow_bias > 0.7:
             comments.append("Buyers dominating tape, dips may get absorbed quickly.")
         elif flow_bias < 0.4:
             comments.append("Sellers pressing, rallies could be sold into.")
 
-    # VWAP / positioning
     if vwap is not None:
         if 0 <= vwap <= 3:
             comments.append("Trading near/just above VWAP – healthy risk/reward zone.")
@@ -770,25 +800,21 @@ def ai_commentary(score, pm, rvol, flow_bias, vwap, ten_day, sentiment, entry_co
         elif vwap < 0:
             comments.append("Below VWAP – still under distribution pressure.")
 
-    # 10-day structure
     if ten_day is not None:
         if ten_day > 15:
             comments.append("10D structure confirmed uptrend; pullbacks may be buyable.")
         elif ten_day < -8:
             comments.append("10D trend in clear distribution – countertrend risk.")
 
-    # News sentiment
     if sentiment is not None:
         if sentiment > 0.4:
             comments.append("Headline flow skewed positive; narrative supportive.")
         elif sentiment < -0.4:
             comments.append("Recent headlines skewed negative; narrative drag present.")
 
-    # Pre-open mode note
     if preopen_mode:
         comments.append("Pre-open mode: signal weights biased toward PM and early volume.")
 
-    # Entry confidence & BCI
     comments.append(f"Entry confidence ~ {entry_conf:.0f}/100.")
     comments.append(f"Breakout confirmation ~ {bci:.0f}/100.")
 
@@ -820,15 +846,13 @@ def scan_one(
         close = hist["Close"]
         daily_volume = hist["Volume"]
 
-        # Use *last close* as anchor price
         price = float(close.iloc[-1])
         daily_vol_last = float(daily_volume.iloc[-1])
 
-        # 🔧 Price/volume filters now use DAILY volume (more stable across premarket/after hours)
+        # Daily volume filter for stability
         if price > max_price or daily_vol_last < min_volume:
             return None
 
-        # Intraday 2m history for PM, VWAP, order flow, LIVE VOLUME
         premarket_pct = None
         vwap_dist = None
         order_flow_bias = None
@@ -844,16 +868,13 @@ def scan_one(
             iopen = intra["Open"]
             ivol = intra["Volume"]
 
-            # LIVE VOLUME: cumulative intraday volume (for display & RVOL)
             live_intraday_volume = float(ivol.sum())
 
-            # Premarket % from last two bars
             last_close = float(iclose.iloc[-1])
             prev_close_intraday = float(iclose.iloc[-2])
             if prev_close_intraday > 0:
                 premarket_pct = (last_close - prev_close_intraday) / prev_close_intraday * 100
 
-            # VWAP
             typical_price = (intra["High"] + intra["Low"] + intra["Close"]) / 3
             total_vol = ivol.sum()
             if total_vol > 0:
@@ -861,7 +882,6 @@ def scan_one(
                 if vwap_val > 0:
                     vwap_dist = (price - vwap_val) / vwap_val * 100
 
-            # Order-flow bias: buy vs sell volume
             of_df = intra[["Open", "Close", "Volume"]].dropna()
             if not of_df.empty:
                 sign = (of_df["Close"] > of_df["Open"]).astype(int) - (of_df["Close"] < of_df["Open"]).astype(int)
@@ -869,9 +889,8 @@ def scan_one(
                 sell_vol = float((of_df["Volume"] * (sign < 0)).sum())
                 total = buy_vol + sell_vol
                 if total > 0:
-                    order_flow_bias = buy_vol / total  # 0..1
+                    order_flow_bias = buy_vol / total
 
-        # --- FIX: True premarket price override when 2m bars are missing ---
         try:
             fi = stock.fast_info
             pre_price = fi.get("last_price", None)
@@ -880,18 +899,15 @@ def scan_one(
             if pre_price and prev_close and prev_close > 0:
                 calc_pm = (pre_price - prev_close) / prev_close * 100
 
-                # Only override during premarket hours (roughly before 9:30am ET ~ 14:30 UTC)
                 now = datetime.now(timezone.utc)
                 if now.hour < 14 or (now.hour == 14 and now.minute < 30):
                     premarket_pct = round(calc_pm, 2)
         except Exception:
             pass
 
-        # If we didn't get live intraday volume, fall back to daily last volume for RVOL purposes
         if live_intraday_volume is None:
             live_intraday_volume = daily_vol_last
 
-        # Momentum windows: yesterday, 3-day, 10-day
         if len(close) >= 2 and close.iloc[-2] > 0:
             yday_pct = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100
         else:
@@ -907,7 +923,6 @@ def scan_one(
         else:
             m10 = None
 
-        # RSI(7)
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(7).mean()
         loss = (-delta.clip(upper=0)).rolling(7).mean()
@@ -915,20 +930,16 @@ def scan_one(
         rsi_series = 100 - (100 / (1 + rs))
         rsi7 = float(rsi_series.iloc[-1])
 
-        # EMA10
         ema10 = float(close.ewm(span=10, adjust=False).mean().iloc[-1])
         ema_trend = "🔥 Breakout" if price > ema10 and rsi7 > 55 else "Neutral"
 
-        # 10-day RVOL using LIVE VOLUME vs average daily volume
         avg10 = float(daily_volume.mean()) if len(daily_volume) > 0 else 0
         rvol10 = live_intraday_volume / avg10 if avg10 > 0 else None
 
-        # Optional order-flow bias filter
         if enable_ofb_filter:
             if order_flow_bias is None or order_flow_bias < min_ofb:
                 return None
 
-        # Enrichment (float, short, news, sentiment)
         squeeze = False
         low_float = False
         catalyst = False
@@ -957,9 +968,8 @@ def scan_one(
                     pub = datetime.fromtimestamp(news[0]["providerPublishTime"], tz=timezone.utc)
                     catalyst = (datetime.now(timezone.utc) - pub).days <= 3
 
-                # sentiment scoring from multiple recent news items
                 sent_vals = []
-                for n in news[:5]:  # analyze up to 5 recent articles
+                for n in news[:5]:
                     t = n.get("title", "")
                     s = n.get("summary", "")
                     sent_vals.append(news_sentiment_score(t, s))
@@ -972,10 +982,8 @@ def scan_one(
             except Exception:
                 pass
 
-        # Multi-timeframe label
         mtf_label = multi_timeframe_label(premarket_pct, m3, m10)
 
-        # Score + ML-style probability
         score = short_window_score(
             pm=premarket_pct,
             yday=yday_pct,
@@ -992,11 +1000,9 @@ def scan_one(
         )
         prob_rise = ml_breakout_probability(score, rvol10, premarket_pct, m10)
 
-        # Entry timing & breakout confirmation index
         entry_conf = entry_confidence_score(vwap_dist, rvol10, order_flow_bias)
         bci = breakout_confirmation_index(score, rvol10, premarket_pct, m10)
 
-        # AI commentary
         ai_text = ai_commentary(
             score=score,
             pm=premarket_pct,
@@ -1010,14 +1016,13 @@ def scan_one(
             preopen_mode=preopen_mode,
         )
 
-        # Sparkline: 10d closes
         spark_series = close
 
         return {
             "Symbol": ticker,
             "Exchange": exchange,
             "Price": round(price, 2),
-            "Volume": int(live_intraday_volume),  # 🔥 live intraday volume (display)
+            "Volume": int(live_intraday_volume),
             "Score": score,
             "Prob_Rise%": prob_rise,
             "PM%": round(premarket_pct, 2) if premarket_pct is not None else None,
@@ -1071,15 +1076,13 @@ def run_scan(
     )
     results = []
 
-    # If ignoring filters for watchlist and watchlist is populated,
-    # we temporarily relax min_volume & max_price via globals-like hack
     global min_volume, max_price
     saved_min_volume = min_volume
     saved_max_price = max_price
 
     if ignore_filters_for_watchlist_flag and watchlist_text.strip():
         min_volume = 0
-        max_price = 10_000.0  # effectively disable
+        max_price = 10_000.0
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=THREADS) as ex:
@@ -1100,7 +1103,6 @@ def run_scan(
                 if res:
                     results.append(res)
     finally:
-        # restore filters for rest of app
         min_volume = saved_min_volume
         max_price = saved_max_price
 
@@ -1170,9 +1172,6 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
     if use_last_results and "last_df" in st.session_state:
         df_raw = st.session_state["last_df"].copy()
     else:
-        # 🔥 Finviz Pure Mode + Volume-Ranked Universe:
-        # when Finviz News Catalyst Required is ON and no watchlist is given,
-        # force universe_mode to Live Volume Ranked (slower).
         effective_universe_mode = universe_mode
         if catalyst_finviz_only and not watchlist_text.strip():
             effective_universe_mode = "Live Volume Ranked (slower)"
@@ -1187,21 +1186,18 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
             volume_rank_pool,
             preopen_mode,
             ignore_filters_for_watchlist,
-            vwap_only,  # vwap_enabled_flag
+            vwap_only,
         )
         st.session_state["last_df"] = df_raw.copy()
 
 if df_raw.empty:
     st.error("No results found. Try adding a watchlist or relaxing filters.")
 else:
-    # === NEW: Finviz precompute + ALWAYS seed any ticker that has Finviz news ===
     finviz_cache: dict[str, list[dict]] = {}
     now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Map of existing seed entries for quick updates
     seed_map = {entry["Symbol"]: entry for entry in st.session_state.seed_universe}
 
-    # Fetch Finviz news for every symbol in df_raw (pre-filters)
     for sym in df_raw["Symbol"].unique():
         try:
             items = get_finviz_news_for_ticker(sym)
@@ -1210,12 +1206,9 @@ else:
         finviz_cache[sym] = items
 
         if items:
-            # ✅ ANY ticker with ANY Finviz news should be part of the seed
             if sym in seed_map:
-                # update LastNewsSeed timestamp
                 seed_map[sym]["LastNewsSeed"] = now_utc_str
             else:
-                # find exchange from df_raw for this symbol
                 try:
                     ex = df_raw.loc[df_raw["Symbol"] == sym, "Exchange"].iloc[0]
                 except Exception:
@@ -1228,27 +1221,18 @@ else:
                 st.session_state.seed_universe.append(entry)
                 seed_map[sym] = entry
 
-    # Update seed size
     st.session_state.seed_universe_size = len(st.session_state.seed_universe)
 
-    # Add Finviz columns to df_raw (for later filtering / display)
     df_raw["FinvizNews"] = df_raw["Symbol"].map(lambda s: bool(finviz_cache.get(s)))
     df_raw["LastNewsSeed"] = df_raw["Symbol"].map(
         lambda s: seed_map.get(s, {}).get("LastNewsSeed")
     )
 
-    # ========================= APPLY FILTERS =========================
-
-    # 🔥 PURE FINVIZ MODE:
-    # if Finviz News Catalyst Required is ON, we ignore all numeric filters
-    # and only show symbols that actually have Finviz news. Momentum stats
-    # are still calculated and used for sorting/alerts.
     if catalyst_finviz_only:
         df = df_raw[df_raw["FinvizNews"]].copy()
     else:
         df = df_raw.copy()
 
-        # Apply numeric filters (unless ignore_filters_for_watchlist is on with non-empty watchlist)
         if not (ignore_filters_for_watchlist and watchlist_text.strip()):
             df = df[df["Score"] >= min_breakout]
 
@@ -1263,7 +1247,6 @@ else:
             if vwap_only:
                 df = df[df["VWAP%"].fillna(-999) > 0]
 
-            # NEW FILTERS: Breakout_Confirm & Entry_Confidence
             if min_breakout_confirm > 0.0 and "Breakout_Confirm" in df.columns:
                 df = df[df["Breakout_Confirm"].fillna(-1) >= min_breakout_confirm]
 
@@ -1273,7 +1256,6 @@ else:
     if df.empty:
         st.error("No results left after filters. Try relaxing constraints.")
     else:
-        # Sort by breakout score and Finviz presence, then PM and RSI7
         df = df.sort_values(
             by=["Score", "FinvizNews", "PM%", "RSI7"],
             ascending=[False, False, False, False],
@@ -1281,19 +1263,16 @@ else:
 
         st.subheader(f"🔥 10-Day Momentum Board (V12) — {len(df)} symbols")
 
-        # Alert banner
         if enable_alerts and st.session_state.alerted:
             alerted_list = ", ".join(sorted(st.session_state.alerted))
             st.info(f"🔔 Active alert symbols: {alerted_list}")
 
-        # ========================= PER-SYMBOL CARDS =========================
         for _, row in df.iterrows():
             sym = row["Symbol"]
             finviz_items = finviz_cache.get(sym, [])
             has_finviz = bool(finviz_items)
             last_news_seed = row.get("LastNewsSeed", None)
 
-            # Audio alerts (once per symbol, if enabled) — after all filters
             if enable_alerts and sym not in st.session_state.alerted:
                 if row["Score"] is not None and row["Score"] >= ALERT_SCORE_THRESHOLD:
                     trigger_audio_alert(sym, f"Score {row['Score']}")
@@ -1304,7 +1283,6 @@ else:
 
             c1, c2, c3, c4 = st.columns([2, 3, 3, 3])
 
-            # Column 1: Basic info + score + volume + seed info
             c1.markdown(f"**{sym}** ({row['Exchange']})")
 
             if has_finviz:
@@ -1319,13 +1297,11 @@ else:
             c1.write(f"{row['MTF_Trend']}")
             c1.write(f"Trend: {row['EMA10 Trend']}")
 
-            # show LastNewsSeed timestamp on card
             if last_news_seed:
                 c1.caption(f"Last News Seeded: {last_news_seed}")
             else:
                 c1.caption("Last News Seeded: —")
 
-            # 🎯 AI Target & 🛑 Stop (simple heuristic, not advice)
             price_val = float(row["Price"])
             bci_val = row.get("Breakout_Confirm", 0.0)
             entry_val = row.get("Entry_Confidence", 0.0)
@@ -1354,10 +1330,8 @@ else:
 
             c1.write(f"📈 R:R: **{rr_text}**")
 
-            # --- AI Explanation for Targets/Stops ---
             ai_expl_list = []
 
-            # Breakout confirmation
             if bci_val >= 70:
                 ai_expl_list.append("Breakout structure strongly confirmed.")
             elif bci_val >= 50:
@@ -1365,7 +1339,6 @@ else:
             else:
                 ai_expl_list.append("Weak confirmation — target conservative.")
 
-            # Entry timing
             if entry_val >= 70:
                 ai_expl_list.append("Entry confidence high; tape favoring long entries.")
             elif entry_val >= 50:
@@ -1373,21 +1346,18 @@ else:
             else:
                 ai_expl_list.append("Entry window uncertain; volatility elevated.")
 
-            # VWAP positioning
             if row["VWAP%"] is not None:
                 if row["VWAP%"] > 0:
                     ai_expl_list.append("Price holding above VWAP (bullish positioning).")
                 else:
                     ai_expl_list.append("Below VWAP — higher risk of failed breakout.")
 
-            # 10-day trend
             if row["10D%"] is not None:
                 if row["10D%"] > 0:
                     ai_expl_list.append("10-day trend supportive.")
                 else:
                     ai_expl_list.append("10-day trend weak — target reduced.")
 
-            # Order Flow Bias
             flow = row.get("FlowBias", None)
             if flow is not None:
                 if flow > 0.6:
@@ -1395,11 +1365,9 @@ else:
                 elif flow < 0.4:
                     ai_expl_list.append("Sellers active — cautious stop placement.")
 
-            # Final AI narrative
             ai_target_expl = " ".join(ai_expl_list)
             c1.markdown(f"🧠 **AI Target Rationale:** {ai_target_expl}")
 
-            # Column 2: Momentum snapshot + confirmation
             c2.write(f"PM%: {row['PM%']}")
             c2.write(f"YDay%: {row['YDay%']}")
             c2.write(f"3D%: {row['3D%']}  |  10D%: {row['10D%']}")
@@ -1407,7 +1375,6 @@ else:
             c2.write(f"Breakout Confirm: {row.get('Breakout_Confirm', 0)} / 100")
             c2.write(f"Entry Confidence: {row.get('Entry_Confidence', 0)} / 100")
 
-            # Column 3: Microstructure + AI commentary + SHORTS + Finviz headlines
             c3.write(f"VWAP Dist %: {row['VWAP%']}")
             c3.write(f"Order Flow Bias: {row['FlowBias']}")
             if enable_enrichment:
@@ -1419,7 +1386,6 @@ else:
             else:
                 c3.write("Enrichment: OFF (float/short/news skipped for speed)")
 
-            # Fintel short data (display only)
             try:
                 short_data = get_fintel_short_data(sym)
             except Exception:
@@ -1436,10 +1402,8 @@ else:
             else:
                 c3.write("Shortable (Fintel): n/a")
 
-            # AI commentary line
             c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
 
-            # Ticker-specific Finviz news
             with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
                 if not finviz_items:
                     st.write("No recent Finviz headlines found for this ticker.")
@@ -1452,14 +1416,12 @@ else:
                             unsafe_allow_html=True,
                         )
 
-            # Column 4: Sparkline + full chart
             c4.plotly_chart(sparkline(row["Spark"]), use_container_width=False)
             with c4.expander("📊 View 10-day chart"):
                 c4.plotly_chart(bigline(row["Spark"], f"{sym} - Last 10 Days"), use_container_width=True)
 
             st.divider()
 
-        # V11/V12: Watchlist multi-view panels
         raw_watch = watchlist_text.strip()
         if raw_watch:
             raw = raw_watch.replace("\n", " ").replace(",", " ").split()
@@ -1488,7 +1450,6 @@ else:
                     use_container_width=True,
                 )
 
-        # Download current table
         csv_cols = [
             "Symbol",
             "Exchange",
@@ -1528,7 +1489,6 @@ else:
             mime="text/csv",
         )
 
-        # Optional: show today's overall Finviz headlines
         with st.expander("📰 Today's Market Headlines (Finviz)"):
             try:
                 finviz_news_today = get_finviz_news_today()
@@ -1536,13 +1496,12 @@ else:
                     st.write("No Finviz headlines found for today yet.")
                 else:
                     for n in finviz_news_today:
-                        st.markdown(
-                            f"**{n['time']}** — [{n['title']}]({n['url']})"
-                        )
+                        st.markdown(f"**{n['time']}** — [{n['title']}]({n['url']})")
             except Exception:
                 st.write("⚠ Could not fetch Finviz daily headlines.")
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
