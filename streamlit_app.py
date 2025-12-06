@@ -823,6 +823,10 @@ def scan_one(
         price = float(close.iloc[-1])
         daily_vol_last = float(daily_volume.iloc[-1])
 
+        # 🔧 Price/volume filters now use DAILY volume (more stable across premarket/after hours)
+        if price > max_price or daily_vol_last < min_volume:
+            return None
+
         # Intraday 2m history for PM, VWAP, order flow, LIVE VOLUME
         premarket_pct = None
         vwap_dist = None
@@ -839,7 +843,7 @@ def scan_one(
             iopen = intra["Open"]
             ivol = intra["Volume"]
 
-            # LIVE VOLUME REPLACEMENT: use cumulative intraday volume
+            # LIVE VOLUME: cumulative intraday volume (for display & RVOL)
             live_intraday_volume = float(ivol.sum())
 
             # Premarket % from last two bars
@@ -882,13 +886,9 @@ def scan_one(
         except Exception:
             pass
 
-        # If we didn't get live intraday volume, fall back to daily
+        # If we didn't get live intraday volume, fall back to daily last volume for RVOL purposes
         if live_intraday_volume is None:
             live_intraday_volume = daily_vol_last
-
-        # Price/volume filters (may be ignored for watchlist via caller logic)
-        if price > max_price or live_intraday_volume < min_volume:
-            return None
 
         # Momentum windows: yesterday, 3-day, 10-day
         if len(close) >= 2 and close.iloc[-2] > 0:
@@ -1016,7 +1016,7 @@ def scan_one(
             "Symbol": ticker,
             "Exchange": exchange,
             "Price": round(price, 2),
-            "Volume": int(live_intraday_volume),  # 🔥 live intraday volume
+            "Volume": int(live_intraday_volume),  # 🔥 live intraday volume (display)
             "Score": score,
             "Prob_Rise%": prob_rise,
             "PM%": round(premarket_pct, 2) if premarket_pct is not None else None,
@@ -1232,7 +1232,7 @@ else:
     # ========================= APPLY FILTERS =========================
     df = df_raw.copy()
 
-    # Apply filters (unless ignore_filters_for_watchlist is on with non-empty watchlist)
+    # Apply numeric filters (unless ignore_filters_for_watchlist is on with non-empty watchlist)
     if not (ignore_filters_for_watchlist and watchlist_text.strip()):
         df = df[df["Score"] >= min_breakout]
 
@@ -1254,7 +1254,7 @@ else:
         if min_entry_confidence > 0.0 and "Entry_Confidence" in df.columns:
             df = df[df["Entry_Confidence"].fillna(-1) >= min_entry_confidence]
 
-    # Strict Finviz display filter (does NOT affect seeding)
+    # Strict Finviz display filter (Option B: news required + momentum sorting preserved)
     if catalyst_finviz_only:
         df = df[df["FinvizNews"]]
 
@@ -1531,4 +1531,5 @@ else:
                 st.write("⚠ Could not fetch Finviz daily headlines.")
 
 st.caption("For research and education only. Not financial advice.")
+
 
