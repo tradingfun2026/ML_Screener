@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import concurrent.futures
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objs as go
 import math
@@ -18,10 +18,11 @@ import pytz
 # ========================= FINVIZ / FINTEL HELPERS =========================
 def get_finviz_news_for_ticker(ticker: str, max_items: int = 12):
     """
-    Scrape Finviz news headlines for a ticker.
-    Handles bot-blocking by using a full browser fingerprint
-    and retries if the first attempt fails.
-    Returns list of dicts: {time, title, sent, url}
+    Scrape ONLY today's Finviz news headlines for a ticker.
+    - Filters strictly to current US/Eastern calendar date
+    - Adds a 'breaking' flag for headlines < 20 minutes old
+
+    Returns list of dicts: {time, title, sent, url, breaking}
     """
     url = f"https://finviz.com/quote.ashx?t={ticker}&p=d"
     headers = {
@@ -46,7 +47,7 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 12):
             return None
 
     soup = None
-    for _ in range(3):  # up to 3 attempts
+    for _ in range(3):
         soup = fetch()
         if soup:
             break
@@ -61,18 +62,57 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 12):
     rows = table.select("tr")
     items = []
 
+    # Current date/time in Finviz timezone
+    et_tz = pytz.timezone("US/Eastern")
+    et_now = datetime.now(et_tz)
+    today_date = et_now.date()
+    today_str = et_now.strftime("%b-%d-%y")  # e.g., "Dec-06-25"
+
     for row in rows[:max_items]:
-        parts = row.find_all("td")
-        if len(parts) < 2:
+        tds = row.find_all("td")
+        if len(tds) < 2:
             continue
 
-        time_text = parts[0].get_text(strip=True)
-        link_tag = parts[1].find("a")
-        if not link_tag:
+        time_text = tds[0].get_text(strip=True)
+        headline_tag = tds[1].find("a")
+        if not headline_tag:
             continue
 
-        title = link_tag.get_text(strip=True)
-        news_url = "https://finviz.com/" + link_tag["href"].lstrip("/")
+        # Finviz timestamp formats:
+        # - First row of a date block: "Dec-06-25 09:21AM"
+        # - Subsequent rows same day: "09:21AM"
+        parts = time_text.split()
+        if len(parts) >= 2 and "-" in parts[0]:
+            # Has an explicit date (e.g. "Dec-06-25 09:21AM")
+            date_part_str = parts[0]
+            time_part_str = parts[1]
+        else:
+            # Only time – implied today
+            date_part_str = today_str
+            time_part_str = parts[0] if parts else "12:00AM"
+
+        # Parse date
+        try:
+            date_only = datetime.strptime(date_part_str, "%b-%d-%y").date()
+        except Exception:
+            continue
+
+        # Filter by calendar date (today only)
+        if date_only != today_date:
+            continue
+
+        # Parse time to build full datetime in US/Eastern
+        try:
+            dt_time = datetime.strptime(time_part_str, "%I:%M%p").time()
+            dt_et = et_tz.localize(datetime.combine(date_only, dt_time))
+        except Exception:
+            dt_et = et_now  # fallback
+
+        age_minutes = (et_now - dt_et).total_seconds() / 60.0
+        breaking_flag = age_minutes >= 0 and age_minutes <= 20  # < 20 minutes old
+
+        title = headline_tag.get_text(strip=True)
+        news_url = "https://finviz.com/" + headline_tag["href"].lstrip("/")
 
         lower = title.lower()
         if any(
@@ -117,7 +157,13 @@ def get_finviz_news_for_ticker(ticker: str, max_items: int = 12):
             sentiment = "⚪"
 
         items.append(
-            {"time": time_text, "title": title, "sent": sentiment, "url": news_url}
+            {
+                "time": time_text,
+                "title": title,
+                "sent": sentiment,
+                "url": news_url,
+                "breaking": breaking_flag,
+            }
         )
 
     return items
@@ -235,7 +281,7 @@ if "auto_refresh_ms" not in st.session_state:
 
 # champion / seed universe state
 if "seed_universe" not in st.session_state:
-    # entries now look like: {"Symbol": "XYZ", "Exchange": "NASDAQ", "LastNewsSeed": "... UTC"}
+    # entries can have: {"Symbol": "XYZ", "Exchange": "NASDAQ", "LastNewsSeed": "... UTC"}
     st.session_state.seed_universe = []
 if "seed_universe_created_at" not in st.session_state:
     st.session_state.seed_universe_created_at = None
@@ -346,9 +392,8 @@ with st.sidebar:
         "Finviz News Catalyst Required",
         value=False,
         help=(
-            "PURE FINVIZ MODE: when enabled, all numeric filters are ignored and "
-            "only tickers with current Finviz headlines are shown. "
-            "Momentum stats still calculated for ranking."
+            "PURE FINVIZ MODE: when enabled, filters to tickers with today-only "
+            "Finviz headlines. Momentum stats still calculated for ranking."
         ),
     )
 
@@ -528,12 +573,10 @@ def build_universe(
 
     # ✅ V12: if we already have a seeded / champion universe, reuse it
     if st.session_state.seed_universe:
-        # Only Symbol and Exchange are used; LastNewsSeed is ignored here
         return st.session_state.seed_universe[:max_universe]
 
     syms = load_symbols()
 
-    # V9 modes (only used the first time, to create the seed_universe)
     if universe_mode == "Randomized Slice":
         base = syms[:]
         random.shuffle(base)
@@ -562,7 +605,6 @@ def build_universe(
             )
             universe = ranked_sorted[:max_universe]
     else:
-        # Classic
         universe = syms[:max_universe]
 
     # Store champion / seed universe in session so it persists across refreshes
@@ -1173,9 +1215,6 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
         df_raw = st.session_state["last_df"].copy()
     else:
         effective_universe_mode = universe_mode
-        if catalyst_finviz_only and not watchlist_text.strip():
-            effective_universe_mode = "Live Volume Ranked (slower)"
-
         df_raw = run_scan(
             watchlist_text,
             max_universe,
@@ -1193,6 +1232,7 @@ with st.spinner("Scanning (10-day momentum, V12 hybrid universe)…"):
 if df_raw.empty:
     st.error("No results found. Try adding a watchlist or relaxing filters.")
 else:
+    # --- FINVIZ PER-TICKER NEWS + AUTO-SEED ---
     finviz_cache: dict[str, list[dict]] = {}
     now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -1206,6 +1246,7 @@ else:
         finviz_cache[sym] = items
 
         if items:
+            # auto-seed when Finviz news exists today
             if sym in seed_map:
                 seed_map[sym]["LastNewsSeed"] = now_utc_str
             else:
@@ -1228,7 +1269,9 @@ else:
         lambda s: seed_map.get(s, {}).get("LastNewsSeed")
     )
 
+    # --- APPLY FILTERS ---
     if catalyst_finviz_only:
+        # STRICT: require Finviz news (today only)
         df = df_raw[df_raw["FinvizNews"]].copy()
     else:
         df = df_raw.copy()
@@ -1256,6 +1299,7 @@ else:
     if df.empty:
         st.error("No results left after filters. Try relaxing constraints.")
     else:
+        # Sort by breakout score, then Finviz presence, then PM%, then RSI
         df = df.sort_values(
             by=["Score", "FinvizNews", "PM%", "RSI7"],
             ascending=[False, False, False, False],
@@ -1271,6 +1315,7 @@ else:
             sym = row["Symbol"]
             finviz_items = finviz_cache.get(sym, [])
             has_finviz = bool(finviz_items)
+            has_breaking = any(n.get("breaking") for n in finviz_items)
             last_news_seed = row.get("LastNewsSeed", None)
 
             if enable_alerts and sym not in st.session_state.alerted:
@@ -1285,10 +1330,12 @@ else:
 
             c1.markdown(f"**{sym}** ({row['Exchange']})")
 
-            if has_finviz:
-                c1.markdown("🔥 **Catalyst (Finviz)**")
+            if has_finviz and has_breaking:
+                c1.markdown("🔥 **BREAKING Finviz News (<20m)**")
+            elif has_finviz:
+                c1.markdown("🔥 **Finviz Catalyst (Today)**")
             else:
-                c1.markdown("⚪ No Finviz Catalyst")
+                c1.markdown("⚪ No Finviz Catalyst Today")
 
             c1.write(f"💲 Price: {row['Price']}")
             c1.write(f"📊 Live Volume: {row['Volume']:,}")
@@ -1404,13 +1451,15 @@ else:
 
             c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
 
-            with c3.expander("📰 Recent Headlines (Finviz)", expanded=True):
+            # --- Ticker-specific Finviz headlines (today-only) with BREAKING badge ---
+            with c3.expander("📰 Recent Headlines (Finviz, Today Only)", expanded=True):
                 if not finviz_items:
-                    st.write("No recent Finviz headlines found for this ticker.")
+                    st.write("No Finviz headlines today for this ticker.")
                 else:
                     for n in finviz_items:
+                        badge = "🔥 BREAKING • " if n.get("breaking") else ""
                         st.markdown(
-                            f"{n['sent']} "
+                            f"{n['sent']} {badge}"
                             f"[{n['title']}]({n['url']})  \n"
                             f"<span style='font-size:10px;color:gray'>{n['time']}</span>",
                             unsafe_allow_html=True,
@@ -1501,6 +1550,7 @@ else:
                 st.write("⚠ Could not fetch Finviz daily headlines.")
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
