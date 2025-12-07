@@ -14,7 +14,6 @@ import requests
 from bs4 import BeautifulSoup
 import pytz
 
-
 # ========================= FINVIZ / FINTEL HELPERS =========================
 def get_finviz_news_for_ticker(ticker: str, max_items: int = 12):
     """
@@ -273,6 +272,12 @@ DEFAULT_MAX_PRICE = 5.0
 DEFAULT_MIN_VOLUME = 100_000
 DEFAULT_MIN_BREAKOUT = 0.0
 
+# NEW: TSX symbol list (Canada)
+TSX_INSTRUMENTS_URL = (
+    "https://github.com/LondonMarket/Global-Stock-Symbols/raw/main/"
+    "tse_instrument_list_june_2024.xlsx"
+)
+
 # ========================= SESSION STATE FOR V11/V12 STREAMING =========================
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = True
@@ -392,8 +397,9 @@ with st.sidebar:
         "Finviz News Catalyst Required",
         value=False,
         help=(
-            "PURE FINVIZ MODE: when enabled, filters to tickers with today-only "
-            "Finviz headlines. Momentum stats still calculated for ranking."
+            "PURE FINVIZ MODE: when enabled, filters to US tickers with today-only "
+            "Finviz headlines. Canadian tickers are still shown but marked as "
+            "'Finviz not available for CAD ticker'."
         ),
     )
 
@@ -501,9 +507,12 @@ with st.sidebar:
 @st.cache_data(ttl=900)
 def load_symbols():
     """
-    Load US symbols (NASDAQ + otherlisted) in a robust way.
+    Load North American symbols:
+    - US symbols (NASDAQ + otherlisted) in a robust way.
+    - Canadian TSX symbols from a public instrument list.
     Handles schema changes on nasdaqtrader with defensive column access.
     """
+    # ---------- US UNIVERSE ----------
     nasdaq = pd.read_csv(
         "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
         sep="|",
@@ -547,7 +556,33 @@ def load_symbols():
     )
 
     df = pd.concat([nasdaq_df, other_df], ignore_index=True).dropna(subset=["Symbol"])
+    # Keep plain US-style tickers
     df = df[df["Symbol"].str.match(r"^[A-Z]{1,5}$", na=False)]
+
+    # ---------- CANADIAN UNIVERSE (TSX) ----------
+    try:
+        tse = pd.read_excel(TSX_INSTRUMENTS_URL)
+        cand_symbol_col = None
+        for col in ["Symbol", "Ticker", "TSX", "TSX_TICKER"]:
+            if col in tse.columns:
+                cand_symbol_col = col
+                break
+        if cand_symbol_col is None:
+            cand_symbol_col = tse.columns[0]
+
+        tse_symbols = tse[cand_symbol_col].astype(str).str.strip()
+        tse_df = pd.DataFrame(
+            {
+                "Symbol": tse_symbols,
+                "Exchange": "TSX",
+            }
+        )
+        tse_df = tse_df[tse_df["Symbol"].str.len() > 0]
+        df = pd.concat([df, tse_df], ignore_index=True)
+    except Exception:
+        # If TSX list fails, fall back to US-only
+        pass
+
     return df.to_dict("records")
 
 
@@ -713,6 +748,7 @@ def news_sentiment_score(title: str, summary: str | None = None) -> float:
     """
     Very lightweight sentiment scorer using keywords.
     Returns value in roughly [-1, 1].
+    (Kept for compatibility; no longer used for Finviz sentiment.)
     """
     text = (title or "") + " " + (summary or "")
     text = text.lower()
@@ -759,6 +795,67 @@ def news_sentiment_score(title: str, summary: str | None = None) -> float:
     for w in neg_words:
         if w in text:
             score -= 1
+
+    if score == 0:
+        return 0.0
+    return max(-1.0, min(1.0, score / 5.0))
+
+
+def finviz_sentiment_from_items(items: list[dict]) -> float:
+    """
+    Compute sentiment from Finviz headline items ONLY, using the
+    same keyword idea as news_sentiment_score. Returns ~[-1, 1].
+    """
+    if not items:
+        return 0.0
+
+    pos_words = [
+        "beat",
+        "beats",
+        "strong",
+        "surge",
+        "upgrade",
+        "upgrades",
+        "bullish",
+        "raises",
+        "raise",
+        "record",
+        "jump",
+        "rally",
+        "soars",
+        "soar",
+        "momentum",
+        "growth",
+    ]
+    neg_words = [
+        "miss",
+        "misses",
+        "weak",
+        "downgrade",
+        "downgrades",
+        "bearish",
+        "cuts",
+        "cut",
+        "plunge",
+        "fall",
+        "falls",
+        "tumbles",
+        "tumble",
+        "guidance cut",
+        "warning",
+        "probe",
+        "investigation",
+    ]
+
+    score = 0
+    for n in items[:10]:
+        txt = (n.get("title", "") or "").lower()
+        for w in pos_words:
+            if w in txt:
+                score += 1
+        for w in neg_words:
+            if w in txt:
+                score -= 1
 
     if score == 0:
         return 0.0
@@ -988,7 +1085,7 @@ def scan_one(
         sector = "Unknown"
         industry = "Unknown"
         short_pct_display = None
-        sentiment_score_val = 0.0
+        sentiment_score_val = 0.0  # will be overridden by Finviz sentiment later
 
         if enable_enrichment:
             try:
@@ -1005,22 +1102,12 @@ def scan_one(
                 pass
 
             try:
+                # Yahoo news only used to set generic 'catalyst' flag;
+                # sentiment is now Finviz-only.
                 news = stock.get_news()
                 if news and "providerPublishTime" in news[0]:
                     pub = datetime.fromtimestamp(news[0]["providerPublishTime"], tz=timezone.utc)
                     catalyst = (datetime.now(timezone.utc) - pub).days <= 3
-
-                sent_vals = []
-                for n in news[:5]:
-                    t = n.get("title", "")
-                    s = n.get("summary", "")
-                    sent_vals.append(news_sentiment_score(t, s))
-
-                if sent_vals:
-                    sentiment_score_val = round(sum(sent_vals) / len(sent_vals), 2)
-                else:
-                    sentiment_score_val = 0.0
-
             except Exception:
                 pass
 
@@ -1045,6 +1132,8 @@ def scan_one(
         entry_conf = entry_confidence_score(vwap_dist, rvol10, order_flow_bias)
         bci = breakout_confirmation_index(score, rvol10, premarket_pct, m10)
 
+        # AI commentary text here still uses 0 sentiment; we will recompute with
+        # Finviz sentiment in the display layer.
         ai_text = ai_commentary(
             score=score,
             pm=premarket_pct,
@@ -1264,15 +1353,27 @@ else:
 
     st.session_state.seed_universe_size = len(st.session_state.seed_universe)
 
+    # Finviz presence, seed timestamp, and Finviz-based sentiment
     df_raw["FinvizNews"] = df_raw["Symbol"].map(lambda s: bool(finviz_cache.get(s)))
     df_raw["LastNewsSeed"] = df_raw["Symbol"].map(
         lambda s: seed_map.get(s, {}).get("LastNewsSeed")
     )
+    df_raw["FinvizSentiment"] = df_raw["Symbol"].map(
+        lambda s: finviz_sentiment_from_items(finviz_cache.get(s, []))
+    )
+    # Overwrite Sentiment column with Finviz-only sentiment for downstream use
+    df_raw["Sentiment"] = df_raw["FinvizSentiment"]
 
     # --- APPLY FILTERS ---
+    us_exchanges = ["NASDAQ", "NYSE", "AMEX", "NYSE/AMEX/ARCA"]
+
     if catalyst_finviz_only:
-        # STRICT: require Finviz news (today only)
-        df = df_raw[df_raw["FinvizNews"]].copy()
+        # STRICT for US: require Finviz news (today only)
+        # Canadian tickers are still allowed through even without Finviz.
+        df = df_raw[
+            (df_raw["FinvizNews"])
+            | (~df_raw["Exchange"].isin(us_exchanges))
+        ].copy()
     else:
         df = df_raw.copy()
 
@@ -1317,6 +1418,7 @@ else:
             has_finviz = bool(finviz_items)
             has_breaking = any(n.get("breaking") for n in finviz_items)
             last_news_seed = row.get("LastNewsSeed", None)
+            exch_str = str(row.get("Exchange", "") or "")
 
             if enable_alerts and sym not in st.session_state.alerted:
                 if row["Score"] is not None and row["Score"] >= ALERT_SCORE_THRESHOLD:
@@ -1335,7 +1437,11 @@ else:
             elif has_finviz:
                 c1.markdown("🔥 **Finviz Catalyst (Today)**")
             else:
-                c1.markdown("⚪ No Finviz Catalyst Today")
+                # Distinguish CAD vs US when Finviz is unavailable
+                if exch_str.upper().startswith("TSX"):
+                    c1.markdown("⚪ Finviz not available for CAD ticker")
+                else:
+                    c1.markdown("⚪ No Finviz Catalyst Today")
 
             c1.write(f"💲 Price: {row['Price']}")
             c1.write(f"📊 Live Volume: {row['Volume']:,}")
@@ -1424,14 +1530,25 @@ else:
 
             c3.write(f"VWAP Dist %: {row['VWAP%']}")
             c3.write(f"Order Flow Bias: {row['FlowBias']}")
+
+            # Finviz sentiment numeric + emoji
+            sent_val = row.get("FinvizSentiment", 0.0)
+            if sent_val > 0.4:
+                sent_emoji = "🟢"
+            elif sent_val < -0.4:
+                sent_emoji = "🔴"
+            else:
+                sent_emoji = "⚪"
+
             if enable_enrichment:
                 c3.write(
                     f"Squeeze: {row['Squeeze?']} | LowFloat: {row['LowFloat?']}"
                 )
                 c3.write(f"Sec/Ind: {row['Sector']} / {row['Industry']}")
-                c3.write(f"News Sentiment: {row.get('Sentiment', 0)}")
+                c3.write(f"News Sentiment (Finviz): {sent_val:+.2f} {sent_emoji}")
             else:
                 c3.write("Enrichment: OFF (float/short/news skipped for speed)")
+                c3.write(f"News Sentiment (Finviz): {sent_val:+.2f} {sent_emoji}")
 
             try:
                 short_data = get_fintel_short_data(sym)
@@ -1449,7 +1566,20 @@ else:
             else:
                 c3.write("Shortable (Fintel): n/a")
 
-            c3.markdown(f"🧠 **AI View:** {row.get('AI_Commentary', '—')}")
+            # Recompute AI commentary using Finviz sentiment so it reflects headline tone
+            ai_view = ai_commentary(
+                score=row["Score"],
+                pm=row["PM%"],
+                rvol=row["RVOL_10D"],
+                flow_bias=row["FlowBias"],
+                vwap=row["VWAP%"],
+                ten_day=row["10D%"],
+                sentiment=sent_val,
+                entry_conf=row.get("Entry_Confidence", 0.0),
+                bci=row.get("Breakout_Confirm", 0.0),
+                preopen_mode=preopen_mode,
+            )
+            c3.markdown(f"🧠 **AI View:** {ai_view}")
 
             # --- Ticker-specific Finviz headlines (today-only) with BREAKING badge ---
             with c3.expander("📰 Recent Headlines (Finviz, Today Only)", expanded=True):
@@ -1528,6 +1658,7 @@ else:
             "Breakout_Confirm",
             "FinvizNews",
             "LastNewsSeed",
+            "FinvizSentiment",
         ]
         csv_cols = [c for c in csv_cols if c in df.columns]
 
@@ -1550,6 +1681,7 @@ else:
                 st.write("⚠ Could not fetch Finviz daily headlines.")
 
 st.caption("For research and education only. Not financial advice.")
+
 
 
 
