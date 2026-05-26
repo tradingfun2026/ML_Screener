@@ -5,6 +5,6 @@ plotly
 streamlit-autorefresh
 numpy
 requests
-
-
-
+beautifulsoup4
+pytz
+lxml
